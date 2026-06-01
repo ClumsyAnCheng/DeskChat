@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="settings-body">
+    <main class="settings-shell">
+      <header class="settings-header">
+        <div>
+          <h1>API 配置</h1>
+          <p>保存多个 OpenAI、DeepSeek 或兼容中转站配置，并随时切换。</p>
+        </div>
+      </header>
+
+      <form id="settingsForm" class="settings-form">
+        <section class="settings-section">
+          <label for="configSelect">当前配置</label>
+          <div class="settings-inline">
+            <select id="configSelect"></select>
+            <button id="newConfig" type="button" class="secondary">新增</button>
+            <button id="deleteConfig" type="button" class="danger">删除</button>
+          </div>
+
+          <label for="configName">配置名称</label>
+          <input id="configName" autocomplete="off" placeholder="例如：OpenAI 主账号" />
+
+          <label for="provider">服务商</label>
+          <select id="provider">
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="custom">中转站 / 兼容接口</option>
+          </select>
+
+          <label for="baseUrl">API 地址</label>
+          <input id="baseUrl" autocomplete="off" />
+
+          <label for="apiKey">API Key</label>
+          <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+
+          <label for="model">模型</label>
+          <input id="model" autocomplete="off" />
+        </section>
+
+        <section class="settings-section">
+          <label for="systemPrompt">系统提示词</label>
+          <textarea id="systemPrompt" rows="8"></textarea>
+
+          <label class="check standalone-check">
+            <input id="enableTools" type="checkbox" />
+            <span>允许截图、命令行、鼠标工具调用</span>
+          </label>
+
+          <label class="check standalone-check">
+            <input id="supportsVision" type="checkbox" />
+            <span>支持图片输入 image_url</span>
+          </label>
+        </section>
+
+        <footer class="settings-actions">
+          <button id="resetProvider" type="button" class="secondary">恢复当前服务商默认值</button>
+          <button id="saveSettings" type="submit">保存配置</button>
+        </footer>
+      </form>
+    </main>
+
+    <script src="settings.js"></script>
+  </body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Deskchat</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">D</div>
+        <div>
+          <h1>Deskchat</h1>
+          <p>本地桌面 AI 助手</p>
+        </div>
+      </div>
+
+      <button id="newConversation" class="new-chat-button" type="button">新建对话</button>
+
+      <nav class="conversation-nav" aria-label="历史对话">
+        <div class="nav-label">历史对话</div>
+        <div id="conversationList" class="conversation-list"></div>
+      </nav>
+    </aside>
+
+    <main class="chat-shell">
+      <header class="chat-toolbar">
+        <div class="toolbar-title">
+          <strong id="conversationTitle">Deskchat</strong>
+          <span>
+            <span id="toolbarState">标准模式</span>
+            <span class="toolbar-separator">/</span>
+            <span id="providerSummary">OpenAI / gpt-5.5</span>
+            <span class="toolbar-separator">/</span>
+            <span id="keyState">未配置 API Key</span>
+          </span>
+        </div>
+        <div class="toolbar-actions" aria-label="菜单栏">
+          <button id="toolbarSettings" type="button" class="secondary">API 配置</button>
+          <button id="toolbarShotButton" type="button" class="secondary">截图</button>
+          <button id="toolbarClearButton" type="button" class="secondary">清空</button>
+          <button id="toolbarNewWindow" type="button" class="secondary">新窗口</button>
+          <button id="toolbarDeleteConversation" type="button" class="secondary danger-text">删除</button>
+          <button id="compactButton" type="button" class="secondary">长条模式</button>
+          <button id="pinButton" type="button" class="secondary">置顶</button>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <div class="input-row">
+          <button id="attachButton" type="button" title="上传图片" class="icon-button">+</button>
+          <textarea id="prompt" rows="2" placeholder="输入消息，例如：看看我在做什么，然后告诉我下一步该点哪里"></textarea>
+          <button id="sendButton" type="submit">发送</button>
+        </div>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden />
+      </form>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

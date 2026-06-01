@@ -1,0 +1,14 @@
+{
+  "name": "deskchat",
+  "version": "0.1.0",
+  "description": "A local desktop AI chat with screenshots, image upload, mouse control, and terminal tools.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:app": "electron .",
+    "typecheck": "node --check main.js && node --check preload.js && node --check renderer.js && node --check settings.js"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7"
+  }
+}
