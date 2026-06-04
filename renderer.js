@@ -43,77 +43,7 @@ let activeKnowledgeBaseId = null;
 let editingItem = null;
 let knowledgePickerOpen = false;
 let windowState = { compact: false, pinned: false };
-let currentSettings = {
-  provider: "openai",
-  providerName: "OpenAI",
-  baseUrl: "https://api.openai.com/v1/chat/completions",
-  apiKey: "",
-  model: "gpt-5.5",
-  enableTools: true,
-  supportsVision: true,
-  systemPrompt:
-    "你是一个运行在用户电脑上的桌面 AI 助手。你可以分析用户上传的图片和截图，也可以在用户明确要求时调用工具执行命令、移动鼠标或点击。调用命令和鼠标工具前先简短说明意图。"
-};
-
-const tools = [
-  {
-    type: "function",
-    function: {
-      name: "take_screenshot",
-      description: "Capture the user's primary screen and return an image for visual analysis.",
-      parameters: { type: "object", properties: {}, additionalProperties: false }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_command",
-      description: "Run a shell command on the user's computer. Use only after the user asks for command-line help.",
-      parameters: {
-        type: "object",
-        properties: {
-          command: { type: "string", description: "The command to run." },
-          timeout: { type: "number", description: "Timeout in milliseconds. Defaults to 30000." }
-        },
-        required: ["command"],
-        additionalProperties: false
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "move_mouse",
-      description: "Move the mouse cursor to screen coordinates.",
-      parameters: {
-        type: "object",
-        properties: {
-          x: { type: "number" },
-          y: { type: "number" }
-        },
-        required: ["x", "y"],
-        additionalProperties: false
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "click_mouse",
-      description: "Click at screen coordinates.",
-      parameters: {
-        type: "object",
-        properties: {
-          x: { type: "number" },
-          y: { type: "number" },
-          button: { type: "string", enum: ["left", "right"] }
-        },
-        required: ["x", "y"],
-        additionalProperties: false
-      }
-    }
-  }
-];
+let currentSettings = { ...window.DeskchatConfig.DEFAULT_SETTINGS };
 
 function activeConversation() {
   return conversations.find((conversation) => conversation.id === currentConversationId) || conversations[0] || null;
@@ -602,82 +532,7 @@ function scrollToBottom() {
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function renderRichText(text) {
-  if (!window.marked || !window.DOMPurify) return escapeHtml(text || "");
-
-  const mathBlocks = [];
-  const mathInlines = [];
-  const source = String(text || "")
-    .replace(/\\\[([\s\S]+?)\\\]/g, (_match, formula) => {
-      const token = `@@MATH_BLOCK_${mathBlocks.length}@@`;
-      mathBlocks.push(formula);
-      return `\n\n${token}\n\n`;
-    })
-    .replace(/\$\$([\s\S]+?)\$\$/g, (_match, formula) => {
-      const token = `@@MATH_BLOCK_${mathBlocks.length}@@`;
-      mathBlocks.push(formula);
-      return `\n\n${token}\n\n`;
-    })
-    .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula) => {
-      const token = `@@MATH_INLINE_${mathInlines.length}@@`;
-      mathInlines.push(formula);
-      return token;
-    })
-    .replace(/(^|[^$])\$([^$\n]+?)\$/g, (_match, prefix, formula) => {
-      const token = `@@MATH_INLINE_${mathInlines.length}@@`;
-      mathInlines.push(formula);
-      return `${prefix}${token}`;
-    });
-
-  window.marked.setOptions({
-    breaks: true,
-    gfm: true,
-    highlight(code, language) {
-      if (!window.hljs) return escapeHtml(code);
-      if (language && window.hljs.getLanguage(language)) {
-        return window.hljs.highlight(code, { language }).value;
-      }
-      return window.hljs.highlightAuto(code).value;
-    }
-  });
-
-  let html = window.marked.parse(source);
-  html = html.replace(/@@MATH_BLOCK_(\d+)@@/g, (_match, index) => renderMath(mathBlocks[Number(index)], true));
-  html = html.replace(/@@MATH_INLINE_(\d+)@@/g, (_match, index) => renderMath(mathInlines[Number(index)], false));
-
-  return window.DOMPurify.sanitize(html, {
-    ADD_TAGS: ["math", "semantics", "mrow", "mi", "mo", "mn", "msup", "msub", "mfrac", "annotation"],
-    ADD_ATTR: ["class", "style", "aria-hidden", "focusable", "xmlns", "encoding"]
-  });
-}
-
-function renderMath(formula, displayMode) {
-  if (!window.katex) return `<code>${escapeHtml(formula || "")}</code>`;
-  try {
-    return window.katex.renderToString(String(formula || "").trim(), {
-      displayMode,
-      throwOnError: false,
-      strict: "ignore",
-      output: "html"
-    });
-  } catch {
-    return `<code>${escapeHtml(formula || "")}</code>`;
-  }
-}
-
-function enhanceRichContent(root) {
-  if (!root || !window.hljs) return;
-  root.querySelectorAll("pre code").forEach((block) => {
-    window.hljs.highlightElement(block);
-  });
+  return window.DeskchatRichRenderer.escapeHtml(value);
 }
 
 function extractTextContent(content) {
@@ -716,8 +571,8 @@ function addMessage(role, text, images = []) {
   bubble.className = "bubble";
   if (role === "assistant") {
     bubble.classList.add("rich");
-    bubble.innerHTML = renderRichText(text || "");
-    enhanceRichContent(bubble);
+    bubble.innerHTML = window.DeskchatRichRenderer.renderRichText(text || "");
+    window.DeskchatRichRenderer.enhanceRichContent(bubble);
   } else {
     bubble.textContent = text || "";
   }
@@ -915,6 +770,7 @@ async function callModel(messages) {
   };
 
   if (settings.enableTools) {
+    const tools = window.DeskchatConfig.TOOL_DEFINITIONS;
     body.tools = settings.supportsVision ? tools : tools.filter((tool) => tool.function.name !== "take_screenshot");
     body.tool_choice = "auto";
   }
@@ -1024,11 +880,8 @@ async function sendMessage(text, images = []) {
     await persistCurrentConversation();
 
     const settings = getSettings();
-    const capabilityPrompt = settings.supportsVision
-      ? ""
-      : "\n\n当前 API 配置不支持图片输入。不要尝试截图分析或要求发送 image_url；如果用户要求看屏幕，请告诉用户需要切换到支持视觉的模型或中转站。";
-    const formatPrompt =
-      "\n\n回答数学、代码或长解释时，请使用清晰的 Markdown：用小标题、短段落、项目列表和必要的公式分块。不要把整段推理挤成一整块。";
+    const capabilityPrompt = settings.supportsVision ? "" : window.DeskchatConfig.TEXT_ONLY_CAPABILITY_PROMPT;
+    const formatPrompt = window.DeskchatConfig.RESPONSE_FORMAT_PROMPT;
     const knowledgePrompt = buildKnowledgeContextPrompt();
     let apiMessages = [{ role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` }, ...chatMessages];
     let finalText = "";
