@@ -88,7 +88,7 @@ function ensureUserDataDir() {
 
 function readJson(file, fallback) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
   } catch {
     return fallback;
   }
@@ -190,12 +190,31 @@ function conversationsPath() {
   return userDataFile("conversations.json");
 }
 
+function normalizeConversationMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  const normalized = [];
+
+  for (const message of messages) {
+    if (!message || (message.role !== "user" && message.role !== "assistant")) continue;
+
+    if (message.role === "assistant") {
+      const content = typeof message.content === "string" ? message.content.trim() : "";
+      if (content) normalized.push({ role: "assistant", content });
+      continue;
+    }
+
+    normalized.push({ role: "user", content: message.content });
+  }
+
+  return normalized;
+}
+
 function normalizeConversation(conversation, index = 0) {
   const now = new Date().toISOString();
   return {
     id: conversation && conversation.id ? String(conversation.id) : makeId("chat"),
     title: conversation && conversation.title ? String(conversation.title) : `新对话 ${index + 1}`,
-    messages: Array.isArray(conversation && conversation.messages) ? conversation.messages : [],
+    messages: normalizeConversationMessages(conversation && conversation.messages),
     createdAt: (conversation && conversation.createdAt) || now,
     updatedAt: (conversation && conversation.updatedAt) || now
   };

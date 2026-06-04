@@ -16,7 +16,7 @@
       type: "function",
       function: {
         name: "take_screenshot",
-        description: "Capture the user's primary screen and return an image for visual analysis.",
+        description: "Capture the user's primary screen only when the user explicitly asks to inspect the screen.",
         parameters: { type: "object", properties: {}, additionalProperties: false }
       }
     },
@@ -24,7 +24,7 @@
       type: "function",
       function: {
         name: "run_command",
-        description: "Run a shell command on the user's computer. Use only after the user asks for command-line help.",
+        description: "Run a local shell command only when the user explicitly asks you to execute a command.",
         parameters: {
           type: "object",
           properties: {
@@ -40,7 +40,7 @@
       type: "function",
       function: {
         name: "move_mouse",
-        description: "Move the mouse cursor to screen coordinates.",
+        description: "Move the mouse cursor only when the user explicitly asks for mouse control.",
         parameters: {
           type: "object",
           properties: {
@@ -56,7 +56,7 @@
       type: "function",
       function: {
         name: "click_mouse",
-        description: "Click at screen coordinates.",
+        description: "Click at screen coordinates only when the user explicitly asks for mouse control.",
         parameters: {
           type: "object",
           properties: {

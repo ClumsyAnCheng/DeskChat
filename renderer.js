@@ -938,6 +938,49 @@ function extractImages(content) {
   return content.filter((part) => part.type === "image_url" && part.image_url && part.image_url.url).map((part) => part.image_url.url);
 }
 
+function contentForModel(content, settings) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  if (settings.supportsVision) return content;
+  return extractTextContent(content);
+}
+
+function messagesForModel(messages, settings) {
+  const safe = [];
+  for (const message of messages) {
+    if (!message || message.role === "system" || message.role === "tool") continue;
+
+    if (message.role === "assistant") {
+      const content = extractTextContent(message.content).trim();
+      if (content) safe.push({ role: "assistant", content });
+      continue;
+    }
+
+    if (message.role === "user") {
+      safe.push({ role: "user", content: contentForModel(message.content, settings) });
+    }
+  }
+  return safe;
+}
+
+function messagesForStorage(messages) {
+  const safe = [];
+  for (const message of messages) {
+    if (!message || message.role === "system" || message.role === "tool") continue;
+
+    if (message.role === "assistant") {
+      const content = extractTextContent(message.content).trim();
+      if (content) safe.push({ role: "assistant", content });
+      continue;
+    }
+
+    if (message.role === "user") {
+      safe.push({ role: "user", content: message.content });
+    }
+  }
+  return safe;
+}
+
 function addMessage(role, text, images = []) {
   if (!chatMessages.length) els.messages.innerHTML = "";
 
@@ -976,7 +1019,6 @@ function renderMessages() {
   for (const message of chatMessages) {
     if (message.role === "system") continue;
     if (message.role === "tool") {
-      addMessage("tool", extractTextContent(message.content));
       continue;
     }
     if (message.role === "assistant" && message.tool_calls) {
@@ -1217,7 +1259,48 @@ function normalizeChatCompletionsUrl(url) {
   return trimmed;
 }
 
-async function callModel(messages) {
+function requestedToolNamesForMessage(text) {
+  const input = String(text || "").toLowerCase();
+  const names = new Set();
+
+  if (/(截图|截屏|屏幕截图|看一下.*屏幕|看看.*屏幕|看.*我的屏幕|看看.*我在做什么|看.*我在做什么|screenshot|screen capture|capture screen)/i.test(input)) {
+    names.add("take_screenshot");
+  }
+
+  if (/(帮我|请|你|直接)?(执行|运行|跑一下|run).*(命令|指令|powershell|cmd|终端|terminal|shell|npm|node|git|docker)/i.test(input)) {
+    names.add("run_command");
+  }
+
+  if (/(移动鼠标|鼠标移动|帮我点击|替我点击|点击屏幕|点一下屏幕|move .*mouse|click .*screen)/i.test(input)) {
+    names.add("move_mouse");
+    names.add("click_mouse");
+  }
+
+  return names;
+}
+
+function toolsForRequest(settings, toolNames) {
+  if (!settings.enableTools || !toolNames || !toolNames.size) return [];
+  const tools = window.DeskchatConfig.TOOL_DEFINITIONS || [];
+  return tools.filter((tool) => {
+    const name = tool.function && tool.function.name;
+    if (!toolNames.has(name)) return false;
+    if (name === "take_screenshot" && !settings.supportsVision) return false;
+    return true;
+  });
+}
+
+function formatCommandResult(result) {
+  const lines = [];
+  lines.push(`Exit code: ${result && Number.isInteger(result.code) ? result.code : "unknown"}`);
+  if (result && result.signal) lines.push(`Signal: ${result.signal}`);
+  if (result && result.stdout) lines.push(`\nstdout:\n${String(result.stdout).trimEnd()}`);
+  if (result && result.stderr) lines.push(`\nstderr:\n${String(result.stderr).trimEnd()}`);
+  if (!result || (!result.stdout && !result.stderr)) lines.push("\n(no output)");
+  return lines.join("\n").slice(0, 6000);
+}
+
+async function callModel(messages, options = {}) {
   const settings = getSettings();
   if (!settings.baseUrl || !settings.apiKey || !settings.model) {
     throw new Error("请先填写 API 地址、API Key 和模型名。");
@@ -1229,9 +1312,9 @@ async function callModel(messages) {
     temperature: 0.7
   };
 
-  if (settings.enableTools) {
-    const tools = window.DeskchatConfig.TOOL_DEFINITIONS;
-    body.tools = settings.supportsVision ? tools : tools.filter((tool) => tool.function.name !== "take_screenshot");
+  const tools = toolsForRequest(settings, options.toolNames);
+  if (tools.length) {
+    body.tools = tools;
     body.tool_choice = "auto";
   }
 
@@ -1299,7 +1382,7 @@ async function executeToolCall(call) {
 
   if (name === "run_command") {
     const result = await window.deskchat.runCommand(args);
-    const shown = JSON.stringify(result, null, 2).slice(0, 6000);
+    const shown = formatCommandResult(result);
     addMessage("tool", shown);
     return { toolMessage: { role: "tool", tool_call_id: call.id, content: shown } };
   }
@@ -1343,11 +1426,15 @@ async function sendMessage(text, images = []) {
     const capabilityPrompt = settings.supportsVision ? "" : window.DeskchatConfig.TEXT_ONLY_CAPABILITY_PROMPT;
     const formatPrompt = window.DeskchatConfig.RESPONSE_FORMAT_PROMPT;
     const knowledgePrompt = await buildRetrievedKnowledgeContextPrompt(text);
-    let apiMessages = [{ role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` }, ...chatMessages];
+    let apiMessages = [
+      { role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` },
+      ...messagesForModel(chatMessages, settings)
+    ];
     let finalText = "";
+    const requestedToolNames = requestedToolNamesForMessage(text);
 
     for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
-      const assistantMessage = await callModel(apiMessages);
+      const assistantMessage = await callModel(apiMessages, { toolNames: requestedToolNames });
       apiMessages.push(assistantMessage);
 
       if (!assistantMessage.tool_calls || !assistantMessage.tool_calls.length) {
@@ -1372,7 +1459,7 @@ async function sendMessage(text, images = []) {
       addMessage("assistant", "工具步骤已达到上限，请继续发送一句话让我接着处理。");
     }
 
-    chatMessages = apiMessages.slice(1);
+    chatMessages = messagesForStorage(apiMessages.slice(1));
     await persistCurrentConversation();
   } catch (error) {
     addMessage("assistant", `出错了：${error.message}`);
