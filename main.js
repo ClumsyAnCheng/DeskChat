@@ -2,12 +2,54 @@ const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, shell
 const path = require("node:path");
 const fs = require("node:fs");
 const { exec } = require("node:child_process");
+const { Transformer } = require("markmap-lib");
+const mammoth = require("mammoth");
+const XLSX = require("xlsx");
+const { PDFParse } = require("pdf-parse");
 
 const isWindows = process.platform === "win32";
 const chatWindows = new Set();
 const windowModes = new Map();
 let mainWindow = null;
 let settingsWindow = null;
+const STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "that",
+  "this",
+  "with",
+  "from",
+  "are",
+  "was",
+  "were",
+  "you",
+  "your",
+  "have",
+  "has",
+  "not",
+  "but",
+  "can",
+  "will",
+  "about",
+  "into",
+  "what",
+  "when",
+  "where",
+  "which",
+  "how",
+  "为什么",
+  "什么",
+  "如何",
+  "怎么",
+  "以及",
+  "这个",
+  "那个",
+  "我们",
+  "你们",
+  "他们",
+  "是否"
+]);
 
 const defaultSystemPrompt =
   "你是一个运行在用户电脑上的桌面 AI 助手。你可以分析用户上传的图片和截图，也可以在用户明确要求时调用工具执行命令、移动鼠标或点击。调用命令和鼠标工具前先简短说明意图。";
@@ -235,7 +277,178 @@ function safeFileName(name) {
     .slice(0, 120) || "file";
 }
 
+function normalizeText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function tokenizeText(value) {
+  const tokens = String(value || "")
+    .toLowerCase()
+    .match(/[\p{Script=Han}]{2,}|[a-z0-9][a-z0-9_-]{1,}/gu);
+  return (tokens || []).filter((token) => !STOP_WORDS.has(token) && token.length <= 40);
+}
+
+function tokenSet(value) {
+  return new Set(tokenizeText(value));
+}
+
+function splitTextIntoChunks(text, options = {}) {
+  const normalized = normalizeText(text);
+  if (!normalized) return [];
+
+  const maxChars = Number(options.maxChars) || 1400;
+  const overlapChars = Number(options.overlapChars) || 180;
+  const paragraphs = normalized.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const chunks = [];
+  let current = "";
+  let index = 0;
+
+  function pushCurrent() {
+    const content = current.trim();
+    if (!content) return;
+    chunks.push({
+      index,
+      text: content,
+      tokens: tokenizeText(content),
+      charLength: content.length
+    });
+    index += 1;
+    current = content.length > overlapChars ? content.slice(-overlapChars) : "";
+  }
+
+  for (const paragraph of paragraphs.length ? paragraphs : [normalized]) {
+    if (paragraph.length > maxChars) {
+      pushCurrent();
+      for (let start = 0; start < paragraph.length; start += maxChars - overlapChars) {
+        const piece = paragraph.slice(start, start + maxChars).trim();
+        if (!piece) continue;
+        chunks.push({
+          index,
+          text: piece,
+          tokens: tokenizeText(piece),
+          charLength: piece.length
+        });
+        index += 1;
+      }
+      current = "";
+      continue;
+    }
+
+    const next = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (next.length > maxChars) {
+      pushCurrent();
+      current = paragraph;
+    } else {
+      current = next;
+    }
+  }
+
+  pushCurrent();
+  return chunks.slice(0, 500);
+}
+
+function summarizeTextForMap(text) {
+  const lines = normalizeText(text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const headings = lines.filter((line) => /^#{1,6}\s+/.test(line)).slice(0, 40);
+  if (headings.length) return headings.map((line) => line.replace(/^#{1,6}\s+/, "")).join("\n");
+  return lines.slice(0, 80).join("\n").slice(0, 12000);
+}
+
+function extractOutlineFromText(text, fileName) {
+  const source = summarizeTextForMap(text);
+  const rawLines = source.split("\n").map((line) => line.trim()).filter(Boolean);
+  const title = safeFileName(fileName).replace(/\.[^.]+$/, "") || "思维导图";
+  const lines = [`# ${title}`];
+  let added = 0;
+
+  for (const raw of rawLines) {
+    const markdownHeading = raw.match(/^(#{1,6})\s+(.+)$/);
+    if (markdownHeading) {
+      const level = Math.min(markdownHeading[1].length + 1, 6);
+      lines.push(`${"#".repeat(level)} ${markdownHeading[2].slice(0, 96)}`);
+      added += 1;
+      continue;
+    }
+
+    const cleaned = raw.replace(/^[-*+\d.)\s]+/, "").slice(0, 120);
+    if (!cleaned) continue;
+    lines.push(`## ${cleaned}`);
+    added += 1;
+    if (added >= 60) break;
+  }
+
+  if (!added) lines.push("## 暂无可分析文本");
+  return lines.join("\n");
+}
+
+function fileExtension(name) {
+  return path.extname(String(name || "")).toLowerCase();
+}
+
+function looksLikeTextFile(name, type) {
+  if (String(type || "").startsWith("text/")) return true;
+  return /\.(md|txt|json|csv|tsv|log|xml|html|css|js|ts|tsx|jsx|py|java|c|cpp|cs|go|rs|php|rb|yml|yaml)$/i.test(name || "");
+}
+
+async function extractTextFromFileBuffer(file, bytes) {
+  const name = file && file.name ? String(file.name) : "";
+  const type = file && file.type ? String(file.type) : "";
+  const ext = fileExtension(name);
+  const buffer = Buffer.from(bytes || []);
+
+  if (!buffer.length) return "";
+
+  try {
+    if (looksLikeTextFile(name, type)) return buffer.toString("utf8");
+
+    if (ext === ".pdf" || type === "application/pdf") {
+      const parser = new PDFParse({ data: buffer });
+      try {
+        const result = await parser.getText();
+        return result && result.text ? result.text : "";
+      } finally {
+        await parser.destroy().catch(() => {});
+      }
+    }
+
+    if (ext === ".docx" || type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+      const result = await mammoth.extractRawText({ buffer });
+      return result && result.value ? result.value : "";
+    }
+
+    if ([".xlsx", ".xls", ".csv", ".ods"].includes(ext) || /spreadsheet|excel|csv/i.test(type)) {
+      const workbook = XLSX.read(buffer, { type: "buffer" });
+      return workbook.SheetNames.map((sheetName) => {
+        const sheet = workbook.Sheets[sheetName];
+        const text = XLSX.utils.sheet_to_csv(sheet, { FS: "\t" });
+        return `# ${sheetName}\n${text}`;
+      }).join("\n\n");
+    }
+  } catch {
+    return "";
+  }
+
+  return normalizeText(file && file.fullText);
+}
+
 function normalizeKnowledgeFile(file) {
+  const fullText = normalizeText(file && file.fullText);
+  const chunks = Array.isArray(file && file.chunks)
+    ? file.chunks.map((chunk, index) => ({
+        index,
+        text: normalizeText(chunk && chunk.text).slice(0, 2200),
+        tokens: Array.isArray(chunk && chunk.tokens) ? chunk.tokens.slice(0, 260) : tokenizeText(chunk && chunk.text),
+        charLength: Number(chunk && chunk.charLength) || normalizeText(chunk && chunk.text).length
+      }))
+    : splitTextIntoChunks(fullText || (file && file.textPreview));
   const now = new Date().toISOString();
   return {
     id: file && file.id ? String(file.id) : makeId("file"),
@@ -244,7 +457,15 @@ function normalizeKnowledgeFile(file) {
     size: Number(file && file.size) || 0,
     addedAt: (file && file.addedAt) || now,
     storedPath: file && file.storedPath ? String(file.storedPath) : "",
-    textPreview: file && file.textPreview ? String(file.textPreview).slice(0, 16000) : ""
+    textPreview: file && file.textPreview ? String(file.textPreview).slice(0, 16000) : fullText.slice(0, 16000),
+    fullText: fullText.slice(0, 500000),
+    chunks,
+    indexStats: {
+      chunkCount: chunks.length,
+      tokenCount: chunks.reduce((total, chunk) => total + (Array.isArray(chunk.tokens) ? chunk.tokens.length : 0), 0),
+      indexedAt: (file && file.indexStats && file.indexStats.indexedAt) || now
+    },
+    mindMapMarkdown: file && file.mindMapMarkdown ? String(file.mindMapMarkdown).slice(0, 50000) : ""
   };
 }
 
@@ -390,7 +611,7 @@ function removeConversationFromKnowledgeBases(conversationId) {
   if (changed) persistKnowledgeStore(store);
 }
 
-function addKnowledgeFile(knowledgeBaseId, file) {
+async function addKnowledgeFile(knowledgeBaseId, file) {
   const store = readKnowledgeStore();
   const targetId = String(knowledgeBaseId || "");
   const index = store.knowledgeBases.findIndex((base) => base.id === targetId);
@@ -404,6 +625,8 @@ function addKnowledgeFile(knowledgeBaseId, file) {
   const storedPath = path.join(dir, storedName);
   const bytes = file && file.bytes ? Buffer.from(file.bytes) : Buffer.alloc(0);
   fs.writeFileSync(storedPath, bytes);
+  const fallbackText = (file && (file.fullText || file.textPreview)) || "";
+  const extractedText = normalizeText((await extractTextFromFileBuffer(file, bytes)) || fallbackText);
 
   const item = normalizeKnowledgeFile({
     id: fileId,
@@ -411,7 +634,8 @@ function addKnowledgeFile(knowledgeBaseId, file) {
     type: file && file.type,
     size: file && file.size,
     storedPath,
-    textPreview: file && file.textPreview
+    textPreview: extractedText.slice(0, 16000),
+    fullText: extractedText
   });
   store.knowledgeBases[index].files.unshift(item);
   store.knowledgeBases[index].updatedAt = new Date().toISOString();
@@ -443,6 +667,80 @@ async function openKnowledgeFile(knowledgeBaseId, fileId) {
   if (!file || !file.storedPath) return { ok: false, error: "File not found." };
   const error = await shell.openPath(file.storedPath);
   return error ? { ok: false, error } : { ok: true };
+}
+
+function scoreChunk(queryTokens, chunk, fileName) {
+  if (!queryTokens.size || !chunk || !chunk.text) return 0;
+  const chunkTokens = Array.isArray(chunk.tokens) && chunk.tokens.length ? chunk.tokens : tokenizeText(chunk.text);
+  const chunkSet = new Set(chunkTokens);
+  const nameSet = tokenSet(fileName);
+  let score = 0;
+
+  for (const token of queryTokens) {
+    if (chunkSet.has(token)) score += 8;
+    if (nameSet.has(token)) score += 3;
+    if (String(chunk.text).toLowerCase().includes(token)) score += 2;
+  }
+
+  const density = chunkTokens.length ? score / Math.sqrt(chunkTokens.length) : score;
+  return Number((score + density).toFixed(4));
+}
+
+function searchKnowledgeBase(knowledgeBaseId, query, options = {}) {
+  const store = readKnowledgeStore();
+  const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
+  if (!base) return { knowledgeBaseId: null, query: String(query || ""), results: [] };
+
+  const queryText = normalizeText(query);
+  const queryTokens = tokenSet(queryText);
+  const limit = Math.max(1, Math.min(Number(options.limit) || 8, 20));
+  const results = [];
+
+  for (const file of base.files) {
+    const chunks = Array.isArray(file.chunks) && file.chunks.length ? file.chunks : splitTextIntoChunks(file.fullText || file.textPreview);
+    for (const chunk of chunks) {
+      const score = scoreChunk(queryTokens, chunk, file.name);
+      if (score <= 0) continue;
+      results.push({
+        knowledgeBaseId: base.id,
+        knowledgeBaseName: base.name,
+        fileId: file.id,
+        fileName: file.name,
+        chunkIndex: chunk.index,
+        score,
+        text: String(chunk.text || "").slice(0, 1800)
+      });
+    }
+  }
+
+  results.sort((a, b) => b.score - a.score);
+  return {
+    knowledgeBaseId: base.id,
+    knowledgeBaseName: base.name,
+    query: queryText,
+    results: results.slice(0, limit)
+  };
+}
+
+function getKnowledgeMindMap(knowledgeBaseId, fileId) {
+  const store = readKnowledgeStore();
+  const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
+  const file = base && base.files.find((item) => item.id === String(fileId || ""));
+  if (!base || !file) return { ok: false, error: "File not found." };
+
+  const markdown = file.mindMapMarkdown || extractOutlineFromText(file.fullText || file.textPreview, file.name);
+  const transformer = new Transformer();
+  const { root, features } = transformer.transform(markdown);
+  return {
+    ok: true,
+    knowledgeBaseId: base.id,
+    knowledgeBaseName: base.name,
+    fileId: file.id,
+    fileName: file.name,
+    markdown,
+    root,
+    features
+  };
 }
 
 function getFocusedChatWindow() {
@@ -743,6 +1041,10 @@ ipcMain.handle("knowledge:remove-file", async (_event, args) =>
   removeKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId)
 );
 ipcMain.handle("knowledge:open-file", async (_event, args) => openKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId));
+ipcMain.handle("knowledge:search", async (_event, args) =>
+  searchKnowledgeBase(args && args.knowledgeBaseId, args && args.query, args && args.options)
+);
+ipcMain.handle("knowledge:mind-map", async (_event, args) => getKnowledgeMindMap(args && args.knowledgeBaseId, args && args.fileId));
 ipcMain.handle("tool:run-command", async (_event, args) => {
   const command = String(args && args.command ? args.command : "");
   if (!command.trim()) return { ok: false, stderr: "No command supplied.", stdout: "" };

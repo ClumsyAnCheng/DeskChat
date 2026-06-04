@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld("deskchat", {
   addKnowledgeFile: (knowledgeBaseId, file) => ipcRenderer.invoke("knowledge:add-file", { knowledgeBaseId, file }),
   removeKnowledgeFile: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:remove-file", { knowledgeBaseId, fileId }),
   openKnowledgeFile: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:open-file", { knowledgeBaseId, fileId }),
+  searchKnowledgeBase: (knowledgeBaseId, query, options) =>
+    ipcRenderer.invoke("knowledge:search", { knowledgeBaseId, query, options }),
+  getKnowledgeMindMap: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:mind-map", { knowledgeBaseId, fileId }),
   onSettingsUpdated: (callback) => {
     ipcRenderer.removeAllListeners("settings:updated");
     ipcRenderer.on("settings:updated", (_event, settings) => callback(settings));

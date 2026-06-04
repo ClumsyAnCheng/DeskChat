@@ -183,6 +183,72 @@ h2 {
   min-height: 0;
 }
 
+.knowledge-search {
+  display: grid;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+
+.knowledge-search input {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.knowledge-search input:focus {
+  border-color: var(--accent);
+  outline: 2px solid rgba(15, 118, 110, 0.12);
+}
+
+.knowledge-search-results {
+  display: grid;
+  gap: 4px;
+}
+
+.knowledge-search-result {
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: #eef2f6;
+  color: var(--text);
+  text-align: left;
+}
+
+.knowledge-search-result:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.knowledge-search-result span,
+.knowledge-search-result small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-search-result span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.knowledge-search-result small,
+.knowledge-search-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-search-empty {
+  padding: 4px 8px 6px;
+}
+
 .knowledge-folder {
   border-radius: 8px;
 }
@@ -683,6 +749,82 @@ button:disabled {
   font-size: 11px;
 }
 
+.mindmap-panel {
+  position: fixed;
+  inset: 28px;
+  z-index: 80;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(31, 35, 40, 0.24);
+}
+
+.mindmap-header {
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: #f7f8fa;
+}
+
+.mindmap-header strong {
+  display: block;
+  max-width: min(56vw, 720px);
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-header span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mindmap-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.mindmap-actions button {
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mindmap-actions button:hover:not(:disabled) {
+  background: #eef2f6;
+}
+
+.mindmap-canvas-wrap {
+  min-width: 0;
+  min-height: 0;
+  background: #fbfcfd;
+}
+
+.mindmap-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .danger-text {
   color: var(--danger);
 }
@@ -1093,6 +1235,10 @@ body.compact-mode .menu-trigger {
   min-height: 32px;
   padding: 6px 7px;
   font-size: 12px;
+}
+
+body.compact-mode .mindmap-panel {
+  inset: 10px;
 }
 
 body.compact-mode #toolbarClearButton,

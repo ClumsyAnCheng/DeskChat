@@ -22,6 +22,8 @@ const els = {
   providerSummary: document.getElementById("providerSummary"),
   keyState: document.getElementById("keyState"),
   knowledgeList: document.getElementById("knowledgeList"),
+  knowledgeSearchInput: document.getElementById("knowledgeSearchInput"),
+  knowledgeSearchResults: document.getElementById("knowledgeSearchResults"),
   conversationList: document.getElementById("conversationList"),
   newConversation: document.getElementById("newConversation"),
   newKnowledgeBase: document.getElementById("newKnowledgeBase"),
@@ -43,6 +45,8 @@ let activeKnowledgeBaseId = null;
 let editingItem = null;
 let knowledgePickerOpen = false;
 let activeMenuGroup = null;
+let mindMapPanel = null;
+let activeMindMap = null;
 let windowState = { compact: false, pinned: false };
 let currentSettings = { ...window.DeskchatConfig.DEFAULT_SETTINGS };
 
@@ -62,17 +66,19 @@ function conversationById(id) {
   return conversations.find((conversation) => conversation.id === id) || null;
 }
 
+function debounce(fn, delay = 250) {
+  let timer = null;
+  return (...args) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), delay);
+  };
+}
+
 function formatFileSize(size) {
   const bytes = Number(size) || 0;
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function isTextLikeFile(file) {
-  if (!file) return false;
-  if (String(file.type || "").startsWith("text/")) return true;
-  return /\.(md|txt|json|csv|tsv|log|xml|html|css|js|ts|tsx|jsx|py|java|c|cpp|cs|go|rs|php|rb|yml|yaml)$/i.test(file.name || "");
 }
 
 function startEditing(type, id) {
@@ -157,6 +163,74 @@ function closeKnowledgePicker() {
   knowledgePickerOpen = false;
   const existing = document.querySelector(".knowledge-picker");
   if (existing) existing.remove();
+}
+
+function closeMindMapPanel() {
+  if (activeMindMap && typeof activeMindMap.destroy === "function") activeMindMap.destroy();
+  activeMindMap = null;
+  if (mindMapPanel) mindMapPanel.remove();
+  mindMapPanel = null;
+}
+
+function downloadText(filename, text, mime = "text/plain") {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function openMindMapPanel(knowledgeBaseId, fileId) {
+  closeMindMapPanel();
+  const result = await window.deskchat.getKnowledgeMindMap(knowledgeBaseId, fileId);
+  if (!result || !result.ok) {
+    addMessage("assistant", result && result.error ? result.error : "思维导图生成失败。");
+    return;
+  }
+
+  mindMapPanel = document.createElement("section");
+  mindMapPanel.className = "mindmap-panel";
+  mindMapPanel.innerHTML = `
+    <header class="mindmap-header">
+      <div>
+        <strong>${escapeHtml(result.fileName)}</strong>
+        <span>${escapeHtml(result.knowledgeBaseName)} / 文件思维导图</span>
+      </div>
+      <div class="mindmap-actions">
+        <button type="button" data-action="download-md">导出 Markdown</button>
+        <button type="button" data-action="fit">适配</button>
+        <button type="button" data-action="close">关闭</button>
+      </div>
+    </header>
+    <div class="mindmap-canvas-wrap">
+      <svg class="mindmap-canvas"></svg>
+    </div>
+  `;
+  document.body.appendChild(mindMapPanel);
+
+  const svg = mindMapPanel.querySelector(".mindmap-canvas");
+  const Markmap = window.markmap && window.markmap.Markmap;
+  if (!Markmap) {
+    addMessage("assistant", "思维导图库加载失败，请重新启动应用后再试。");
+    closeMindMapPanel();
+    return;
+  }
+
+  activeMindMap = Markmap.create(svg, {
+    autoFit: true,
+    colorFreezeLevel: 2,
+    duration: 220,
+    maxWidth: 360
+  }, result.root);
+
+  mindMapPanel.querySelector('[data-action="close"]').addEventListener("click", closeMindMapPanel);
+  mindMapPanel.querySelector('[data-action="fit"]').addEventListener("click", () => activeMindMap && activeMindMap.fit());
+  mindMapPanel.querySelector('[data-action="download-md"]').addEventListener("click", () => {
+    const filename = `${result.fileName.replace(/\.[^.]+$/, "") || "mindmap"}.md`;
+    downloadText(filename, result.markdown, "text/markdown");
+  });
 }
 
 function closeAppMenus() {
@@ -474,6 +548,17 @@ function renderConversationList() {
         open.innerHTML = `<span class="file-icon">□</span><span>${escapeHtml(file.name)}</span><small>${formatFileSize(file.size)}</small>`;
         open.addEventListener("click", () => window.deskchat.openKnowledgeFile(base.id, file.id));
 
+        const mindMap = document.createElement("button");
+        mindMap.type = "button";
+        mindMap.className = "row-action";
+        mindMap.textContent = "导图";
+        mindMap.title = "根据文件生成思维导图";
+        mindMap.disabled = !(file.textPreview || file.fullText || (file.indexStats && file.indexStats.chunkCount));
+        mindMap.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await openMindMapPanel(base.id, file.id);
+        });
+
         const removeFile = document.createElement("button");
         removeFile.type = "button";
         removeFile.className = "row-action";
@@ -484,7 +569,7 @@ function renderConversationList() {
           await window.deskchat.removeKnowledgeFile(base.id, file.id);
         });
 
-        row.append(open, removeFile);
+        row.append(open, mindMap, removeFile);
         children.appendChild(row);
       }
 
@@ -650,12 +735,50 @@ function applyKnowledgeStore(store, preferredId) {
     (activeKnowledgeBaseId && knowledgeBases.some((base) => base.id === activeKnowledgeBaseId) ? activeKnowledgeBaseId : null) ||
     store.activeKnowledgeBaseId ||
     null;
+  if (els.knowledgeSearchInput && !activeKnowledgeBaseId) els.knowledgeSearchInput.value = "";
+  clearKnowledgeSearchResults();
   renderConversationList();
 }
 
 async function loadKnowledgeBases(preferredId) {
   const store = await window.deskchat.getKnowledgeBases();
   applyKnowledgeStore(store, preferredId);
+}
+
+function clearKnowledgeSearchResults() {
+  if (els.knowledgeSearchResults) els.knowledgeSearchResults.innerHTML = "";
+}
+
+async function runKnowledgeSearch() {
+  const base = activeKnowledgeBase();
+  const query = els.knowledgeSearchInput ? els.knowledgeSearchInput.value.trim() : "";
+  clearKnowledgeSearchResults();
+  if (!els.knowledgeSearchResults || !base || query.length < 2) return;
+
+  const search = await window.deskchat.searchKnowledgeBase(base.id, query, { limit: 6 });
+  if (!search.results || !search.results.length) {
+    const empty = document.createElement("div");
+    empty.className = "knowledge-search-empty";
+    empty.textContent = "没有命中片段";
+    els.knowledgeSearchResults.appendChild(empty);
+    return;
+  }
+
+  for (const result of search.results) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "knowledge-search-result";
+    item.innerHTML = `
+      <span>${escapeHtml(result.fileName)} #${Number(result.chunkIndex) + 1}</span>
+      <small>${escapeHtml(result.text.slice(0, 180))}</small>
+    `;
+    item.addEventListener("click", () => {
+      const ref = `[${result.fileName}#${Number(result.chunkIndex) + 1}]`;
+      els.prompt.value = `请基于这个知识库片段回答：${ref}\n\n${result.text.slice(0, 1200)}`;
+      els.prompt.focus();
+    });
+    els.knowledgeSearchResults.appendChild(item);
+  }
 }
 
 function renderAttachments() {
@@ -702,17 +825,10 @@ async function addFilesToKnowledgeBase(files, knowledgeBaseId = activeKnowledgeB
     }
 
     const buffer = await file.arrayBuffer();
-    let textPreview = "";
-    if (isTextLikeFile(file)) {
-      textPreview = await file.text().catch(() => "");
-      textPreview = textPreview.slice(0, 16000);
-    }
-
     await window.deskchat.addKnowledgeFile(target.id, {
       name: file.name,
       type: file.type || "application/octet-stream",
       size: file.size,
-      textPreview,
       bytes: new Uint8Array(buffer)
     });
   }
@@ -753,6 +869,46 @@ function buildKnowledgeContextPrompt() {
         lines.push(file.textPreview.slice(0, 6000));
       } else {
         lines.push("此文件没有可注入的文本预览，只能作为已上传文件记录。");
+      }
+    }
+  }
+
+  const relatedConversations = base.conversationIds.map(conversationById).filter(Boolean);
+  if (relatedConversations.length) {
+    lines.push("\n知识库内相关对话：");
+    for (const conversation of relatedConversations.slice(0, 12)) {
+      lines.push(`- ${conversation.title || "新对话"}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function buildRetrievedKnowledgeContextPrompt(query) {
+  const base = activeKnowledgeBase();
+  if (!base) return "";
+
+  const lines = [
+    "",
+    "",
+    `当前知识库：${base.name}`,
+    "下面是按用户问题检索出的知识库片段。回答时优先引用这些材料；如果材料不足，请明确说明。引用格式使用 [文件名#片段序号]。"
+  ];
+
+  if (!base.files.length) {
+    lines.push("当前知识库还没有上传文件。");
+  } else {
+    const search = await window.deskchat.searchKnowledgeBase(base.id, query || "", { limit: 8 });
+    if (search.results && search.results.length) {
+      for (const result of search.results) {
+        lines.push(`\n[${result.fileName}#${Number(result.chunkIndex) + 1}] score=${result.score}`);
+        lines.push(result.text);
+      }
+    } else {
+      lines.push("没有检索到与本次问题直接相关的片段。可参考文件清单：");
+      for (const file of base.files.slice(0, 20)) {
+        const chunkCount = file.indexStats && file.indexStats.chunkCount ? file.indexStats.chunkCount : 0;
+        lines.push(`- ${file.name} (${formatFileSize(file.size)}, ${chunkCount} 个索引片段)`);
       }
     }
   }
@@ -902,7 +1058,7 @@ async function sendMessage(text, images = []) {
     const settings = getSettings();
     const capabilityPrompt = settings.supportsVision ? "" : window.DeskchatConfig.TEXT_ONLY_CAPABILITY_PROMPT;
     const formatPrompt = window.DeskchatConfig.RESPONSE_FORMAT_PROMPT;
-    const knowledgePrompt = buildKnowledgeContextPrompt();
+    const knowledgePrompt = await buildRetrievedKnowledgeContextPrompt(text);
     let apiMessages = [{ role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` }, ...chatMessages];
     let finalText = "";
 
@@ -987,8 +1143,13 @@ els.newKnowledgeBase.addEventListener("click", async () => {
 els.clearKnowledgeSelection.addEventListener("click", async () => {
   activeKnowledgeBaseId = null;
   await window.deskchat.setActiveKnowledgeBase(null);
+  if (els.knowledgeSearchInput) els.knowledgeSearchInput.value = "";
+  clearKnowledgeSearchResults();
   renderConversationList();
 });
+if (els.knowledgeSearchInput) {
+  els.knowledgeSearchInput.addEventListener("input", debounce(runKnowledgeSearch, 250));
+}
 els.toolbarUploadKnowledge.addEventListener("click", () => {
   if (!activeKnowledgeBase()) {
     addMessage("assistant", "请先在左侧选择或创建一个知识库。");
@@ -1081,6 +1242,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (mindMapPanel) closeMindMapPanel();
   if (knowledgePickerOpen) closeKnowledgePicker();
   if (activeMenuGroup) closeAppMenus();
 });
