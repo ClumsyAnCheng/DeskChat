@@ -439,9 +439,53 @@ async function extractTextFromFileBuffer(file, bytes) {
   return normalizeText(file && file.fullText);
 }
 
+function getKnowledgeFileIndexStatus(file, chunks) {
+  const now = new Date().toISOString();
+  const indexedChunks = Array.isArray(chunks) ? chunks.length : Number(file && file.indexStats && file.indexStats.chunkCount) || 0;
+  const storedPath = file && file.storedPath ? String(file.storedPath) : "";
+  const sourceExists = storedPath ? fs.existsSync(storedPath) : false;
+  const name = file && file.name ? String(file.name) : "";
+  const ext = fileExtension(name);
+
+  if (indexedChunks > 0) {
+    return {
+      state: "ready",
+      label: "已索引",
+      detail: `${indexedChunks} 个片段可检索。`,
+      updatedAt: now
+    };
+  }
+
+  if (storedPath && !sourceExists) {
+    return {
+      state: "source_missing",
+      label: "原文件丢失",
+      detail: "知识库记录存在，但上传副本不在本机；请重新导入该文件。",
+      updatedAt: now
+    };
+  }
+
+  if (ext === ".pdf" || String(file && file.type || "").includes("pdf")) {
+    return {
+      state: "empty_text",
+      label: "未提取文本",
+      detail: "PDF 未解析到文本；如果是扫描版或图片型 PDF，需要 OCR 后再入库。",
+      updatedAt: now
+    };
+  }
+
+  return {
+    state: "empty_text",
+    label: "未提取文本",
+    detail: "文件未解析出可检索文本，请重建索引或重新导入。",
+    updatedAt: now
+  };
+}
+
 function normalizeKnowledgeFile(file) {
   const fullText = normalizeText(file && file.fullText);
-  const chunks = Array.isArray(file && file.chunks)
+  const hasStoredChunks = Array.isArray(file && file.chunks) && file.chunks.length > 0;
+  const chunks = hasStoredChunks
     ? file.chunks.map((chunk, index) => ({
         index,
         text: normalizeText(chunk && chunk.text).slice(0, 2200),
@@ -450,6 +494,7 @@ function normalizeKnowledgeFile(file) {
       }))
     : splitTextIntoChunks(fullText || (file && file.textPreview));
   const now = new Date().toISOString();
+  const indexStatus = getKnowledgeFileIndexStatus(file, chunks);
   return {
     id: file && file.id ? String(file.id) : makeId("file"),
     name: file && file.name ? String(file.name) : "未命名文件",
@@ -465,6 +510,7 @@ function normalizeKnowledgeFile(file) {
       tokenCount: chunks.reduce((total, chunk) => total + (Array.isArray(chunk.tokens) ? chunk.tokens.length : 0), 0),
       indexedAt: (file && file.indexStats && file.indexStats.indexedAt) || now
     },
+    indexStatus,
     mindMapMarkdown: file && file.mindMapMarkdown ? String(file.mindMapMarkdown).slice(0, 50000) : ""
   };
 }
@@ -643,6 +689,72 @@ async function addKnowledgeFile(knowledgeBaseId, file) {
   return persistKnowledgeStore(store);
 }
 
+async function reindexKnowledgeFile(knowledgeBaseId, fileId) {
+  const store = readKnowledgeStore();
+  const targetId = String(knowledgeBaseId || "");
+  const targetFileId = String(fileId || "");
+  const baseIndex = store.knowledgeBases.findIndex((base) => base.id === targetId);
+  if (baseIndex < 0) return { ok: false, error: "Knowledge base not found." };
+
+  const base = store.knowledgeBases[baseIndex];
+  const fileIndex = base.files.findIndex((item) => item.id === targetFileId);
+  if (fileIndex < 0) return { ok: false, error: "File not found." };
+
+  const file = base.files[fileIndex];
+  if (!file.storedPath) {
+    file.indexStatus = {
+      state: "source_missing",
+      label: "原文件丢失",
+      detail: "知识库中没有该文件的本地上传副本，请重新导入。",
+      updatedAt: new Date().toISOString()
+    };
+    base.updatedAt = new Date().toISOString();
+    const nextStore = persistKnowledgeStore(store);
+    return { ok: false, error: file.indexStatus.detail, store: nextStore };
+  }
+
+  const root = path.resolve(knowledgeFilesRoot());
+  const target = path.resolve(file.storedPath);
+  if (!(target === root || target.startsWith(root + path.sep)) || !fs.existsSync(target)) {
+    file.indexStatus = {
+      state: "source_missing",
+      label: "原文件丢失",
+      detail: "知识库记录存在，但上传副本不在本机；请重新导入该文件。",
+      updatedAt: new Date().toISOString()
+    };
+    base.updatedAt = new Date().toISOString();
+    const nextStore = persistKnowledgeStore(store);
+    return { ok: false, error: file.indexStatus.detail, store: nextStore };
+  }
+
+  const bytes = fs.readFileSync(target);
+  const extractedText = normalizeText(await extractTextFromFileBuffer(file, bytes));
+  const nextFile = normalizeKnowledgeFile({
+    ...file,
+    textPreview: extractedText.slice(0, 16000),
+    fullText: extractedText,
+    chunks: undefined,
+    indexStats: undefined,
+    indexStatus: undefined,
+    mindMapMarkdown: ""
+  });
+
+  base.files[fileIndex] = nextFile;
+  base.updatedAt = new Date().toISOString();
+  const nextStore = persistKnowledgeStore(store);
+
+  if (!nextFile.indexStats.chunkCount) {
+    return {
+      ok: false,
+      error: nextFile.indexStatus.detail,
+      file: nextFile,
+      store: nextStore
+    };
+  }
+
+  return { ok: true, file: nextFile, store: nextStore };
+}
+
 function removeKnowledgeFile(knowledgeBaseId, fileId) {
   const store = readKnowledgeStore();
   const targetId = String(knowledgeBaseId || "");
@@ -686,26 +798,58 @@ function scoreChunk(queryTokens, chunk, fileName) {
   return Number((score + density).toFixed(4));
 }
 
-function searchKnowledgeBase(knowledgeBaseId, query, options = {}) {
+async function searchKnowledgeBase(knowledgeBaseId, query, options = {}) {
   const store = readKnowledgeStore();
   const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
-  if (!base) return { knowledgeBaseId: null, query: String(query || ""), results: [] };
+  if (!base) return { knowledgeBaseId: null, query: String(query || ""), results: [], diagnostics: [] };
 
   const queryText = normalizeText(query);
   const queryTokens = tokenSet(queryText);
   const limit = Math.max(1, Math.min(Number(options.limit) || 8, 20));
   const results = [];
+  const diagnostics = [];
 
   for (const file of base.files) {
-    const chunks = Array.isArray(file.chunks) && file.chunks.length ? file.chunks : splitTextIntoChunks(file.fullText || file.textPreview);
+    let currentFile = file;
+    let chunks = Array.isArray(currentFile.chunks) && currentFile.chunks.length
+      ? currentFile.chunks
+      : splitTextIntoChunks(currentFile.fullText || currentFile.textPreview);
+
+    if (!chunks.length && currentFile.storedPath) {
+      const reindex = await reindexKnowledgeFile(base.id, currentFile.id);
+      if (reindex.file) {
+        currentFile = reindex.file;
+        chunks = Array.isArray(currentFile.chunks) ? currentFile.chunks : [];
+      }
+      if (!reindex.ok) {
+        diagnostics.push({
+          fileId: currentFile.id,
+          fileName: currentFile.name,
+          state: currentFile.indexStatus && currentFile.indexStatus.state || "empty_text",
+          message: reindex.error || "文件未能建立索引。"
+        });
+      }
+    }
+
+    if (!chunks.length) {
+      const status = getKnowledgeFileIndexStatus(currentFile, chunks);
+      diagnostics.push({
+        fileId: currentFile.id,
+        fileName: currentFile.name,
+        state: status.state,
+        message: status.detail
+      });
+      continue;
+    }
+
     for (const chunk of chunks) {
-      const score = scoreChunk(queryTokens, chunk, file.name);
+      const score = scoreChunk(queryTokens, chunk, currentFile.name);
       if (score <= 0) continue;
       results.push({
         knowledgeBaseId: base.id,
         knowledgeBaseName: base.name,
-        fileId: file.id,
-        fileName: file.name,
+        fileId: currentFile.id,
+        fileName: currentFile.name,
         chunkIndex: chunk.index,
         score,
         text: String(chunk.text || "").slice(0, 1800)
@@ -718,17 +862,30 @@ function searchKnowledgeBase(knowledgeBaseId, query, options = {}) {
     knowledgeBaseId: base.id,
     knowledgeBaseName: base.name,
     query: queryText,
-    results: results.slice(0, limit)
+    results: results.slice(0, limit),
+    diagnostics
   };
 }
 
-function getKnowledgeMindMap(knowledgeBaseId, fileId) {
+async function getKnowledgeMindMap(knowledgeBaseId, fileId) {
   const store = readKnowledgeStore();
   const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
-  const file = base && base.files.find((item) => item.id === String(fileId || ""));
+  let file = base && base.files.find((item) => item.id === String(fileId || ""));
   if (!base || !file) return { ok: false, error: "File not found." };
 
-  const markdown = file.mindMapMarkdown || extractOutlineFromText(file.fullText || file.textPreview, file.name);
+  if (!(file.fullText || file.textPreview || (Array.isArray(file.chunks) && file.chunks.length)) && file.storedPath) {
+    const reindex = await reindexKnowledgeFile(base.id, file.id);
+    if (reindex.file) file = reindex.file;
+    if (!reindex.ok) return { ok: false, error: reindex.error || "该文件没有可分析文本。", file };
+  }
+
+  const sourceText = file.fullText || file.textPreview || (Array.isArray(file.chunks) ? file.chunks.map((chunk) => chunk.text).join("\n\n") : "");
+  if (!normalizeText(sourceText)) {
+    const status = getKnowledgeFileIndexStatus(file, file.chunks || []);
+    return { ok: false, error: status.detail, file };
+  }
+
+  const markdown = file.mindMapMarkdown || extractOutlineFromText(sourceText, file.name);
   const transformer = new Transformer();
   const { root, features } = transformer.transform(markdown);
   return {
@@ -1041,6 +1198,9 @@ ipcMain.handle("knowledge:remove-file", async (_event, args) =>
   removeKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId)
 );
 ipcMain.handle("knowledge:open-file", async (_event, args) => openKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId));
+ipcMain.handle("knowledge:reindex-file", async (_event, args) =>
+  reindexKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId)
+);
 ipcMain.handle("knowledge:search", async (_event, args) =>
   searchKnowledgeBase(args && args.knowledgeBaseId, args && args.query, args && args.options)
 );
