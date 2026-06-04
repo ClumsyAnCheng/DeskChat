@@ -1,17 +1,19 @@
 :root {
   color-scheme: light;
   font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
-  background: #f7f7f5;
+  background: #f7f8fa;
   color: #1f2328;
-  --bg: #f7f7f5;
+  --bg: #f7f8fa;
   --surface: #ffffff;
-  --surface-muted: #f0f1ee;
-  --border: #dedfd9;
-  --border-strong: #c9cbc4;
+  --surface-muted: #f1f3f5;
+  --border: #dfe3e8;
+  --border-strong: #c9d1d9;
   --text: #1f2328;
   --muted: #6b7280;
   --accent: #0f766e;
   --accent-strong: #0b5f59;
+  --accent-soft: #e3f3ef;
+  --code-bg: #f6f8fa;
   --danger: #b42318;
   --shadow-soft: 0 12px 34px rgba(31, 35, 40, 0.08);
 }
@@ -38,7 +40,7 @@ textarea {
 
 .sidebar {
   border-right: 1px solid var(--border);
-  background: #f4f5f2;
+  background: #f3f5f7;
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -100,7 +102,7 @@ h2 {
 }
 
 .new-chat-button:hover:not(:disabled) {
-  background: #ecefeb;
+  background: #e9eef2;
 }
 
 .sidebar-actions {
@@ -109,7 +111,7 @@ h2 {
 }
 
 .new-chat-button.subtle {
-  background: #ecefeb;
+  background: #e8edf1;
   border-color: transparent;
   box-shadow: none;
 }
@@ -186,7 +188,7 @@ h2 {
 }
 
 .knowledge-folder.active > .knowledge-header {
-  background: #e3ebe8;
+  background: var(--accent-soft);
 }
 
 .knowledge-header {
@@ -200,7 +202,7 @@ h2 {
 }
 
 .knowledge-header:hover {
-  background: #e9ebe6;
+  background: #e8edf1;
 }
 
 .folder-toggle {
@@ -316,7 +318,7 @@ h2 {
 }
 
 .file-title:hover:not(:disabled) {
-  background: #e9ebe6;
+  background: #e8edf1;
 }
 
 .file-title small {
@@ -362,11 +364,11 @@ h2 {
 }
 
 .conversation-item:hover:not(:disabled) {
-  background: #e9ebe6;
+  background: #e8edf1;
 }
 
 .conversation-item.active {
-  background: #e0e7e4;
+  background: var(--accent-soft);
   color: #102f2b;
   font-weight: 600;
 }
@@ -461,12 +463,12 @@ button:disabled {
 }
 
 .secondary {
-  background: #e7e8e3;
+  background: #e9edf2;
   color: #2b3036;
 }
 
 .secondary:hover:not(:disabled) {
-  background: #d9dbd3;
+  background: #dde3ea;
 }
 
 .danger {
@@ -516,7 +518,7 @@ button:disabled {
 .chat-toolbar {
   min-height: 64px;
   border-bottom: 1px solid var(--border);
-  background: rgba(247, 247, 245, 0.94);
+  background: rgba(247, 248, 250, 0.94);
   backdrop-filter: blur(14px);
   padding: 10px 18px;
   display: flex;
@@ -605,11 +607,11 @@ button:disabled {
 }
 
 .knowledge-picker-option:hover:not(:disabled) {
-  background: #ecefeb;
+  background: #e8edf1;
 }
 
 .knowledge-picker-option.active {
-  background: #e0e7e4;
+  background: var(--accent-soft);
   color: #102f2b;
 }
 
@@ -692,6 +694,10 @@ button:disabled {
   width: 100%;
 }
 
+.bubble.rich > * {
+  max-width: 100%;
+}
+
 .bubble.rich p {
   margin: 0 0 14px;
 }
@@ -724,27 +730,70 @@ button:disabled {
   margin: 4px 0;
 }
 
+.bubble.rich blockquote {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--border-strong);
+  background: #f6f8fa;
+  color: #4b5563;
+}
+
 .bubble.rich hr {
   border: 0;
   border-top: 1px solid var(--border);
   margin: 16px 0;
 }
 
-.bubble.rich code,
-.math-inline,
-.math-block {
-  font-family: "Cambria Math", "Times New Roman", "Cascadia Mono", monospace;
-  background: #f0f1ee;
+.bubble.rich table {
+  width: max-content;
+  max-width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  margin: 12px 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.bubble.rich thead {
+  background: #f1f4f7;
+}
+
+.bubble.rich th,
+.bubble.rich td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.bubble.rich th {
+  font-weight: 700;
+  color: #111827;
+}
+
+.bubble.rich code {
+  font-family: "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 1px 5px;
+  font-size: 0.92em;
 }
 
-.math-block {
-  display: block;
-  margin: 8px 0;
-  padding: 8px 10px;
+.bubble.rich .katex {
+  font-size: 1.04em;
+}
+
+.bubble.rich .katex-display {
+  margin: 12px 0 16px;
+  padding: 12px 14px;
   overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfd;
 }
 
 .bubble.rich pre {
@@ -752,8 +801,9 @@ button:disabled {
   padding: 13px 14px;
   border-radius: 8px;
   overflow-x: auto;
-  background: #202327;
-  color: #f6f8fa;
+  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: #24292f;
 }
 
 .bubble.rich pre code {

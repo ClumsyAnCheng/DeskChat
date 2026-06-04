@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Deskchat</title>
+    <link rel="stylesheet" href="node_modules/katex/dist/katex.min.css" />
+    <link rel="stylesheet" href="node_modules/@highlightjs/cdn-assets/styles/github.min.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -12,7 +14,7 @@
         <div class="mark">D</div>
         <div>
           <h1>Deskchat</h1>
-          <p>本地桌面 AI 助手</p>
+          <p>本地桌面 AI 工作台</p>
         </div>
       </div>
 
@@ -21,7 +23,7 @@
         <button id="newKnowledgeBase" class="new-chat-button subtle" type="button">新建知识库</button>
       </div>
 
-      <nav class="conversation-nav" aria-label="消息列表">
+      <nav class="conversation-nav" aria-label="会话导航">
         <div class="nav-row">
           <div class="nav-label">知识库</div>
           <button id="clearKnowledgeSelection" class="mini-button" type="button" title="显示普通对话">全部</button>
@@ -47,9 +49,9 @@
             <span id="keyState">未配置 API Key</span>
           </span>
         </div>
-        <div class="toolbar-actions" aria-label="菜单栏">
+        <div class="toolbar-actions" aria-label="工具栏">
           <button id="toolbarSettings" type="button" class="secondary">API 配置</button>
-          <button id="toolbarUploadKnowledge" type="button" class="secondary">上传到知识库</button>
+          <button id="toolbarUploadKnowledge" type="button" class="secondary">上传知识</button>
           <button id="toolbarLinkKnowledge" type="button" class="secondary">加入知识库</button>
           <button id="toolbarShotButton" type="button" class="secondary">截图</button>
           <button id="toolbarClearButton" type="button" class="secondary">清空</button>
@@ -74,6 +76,10 @@
       </form>
     </main>
 
+    <script src="node_modules/dompurify/dist/purify.min.js"></script>
+    <script src="node_modules/marked/lib/marked.umd.js"></script>
+    <script src="node_modules/katex/dist/katex.min.js"></script>
+    <script src="node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

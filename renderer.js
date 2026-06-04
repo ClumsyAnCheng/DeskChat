@@ -610,107 +610,74 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-function renderInline(text) {
-  let html = escapeHtml(text);
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  html = html.replace(/\\\[(.+?)\\\]/g, '<span class="math-block">$1</span>');
-  html = html.replace(/\\\((.+?)\\\)/g, '<span class="math-inline">$1</span>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  return html;
-}
-
-function appendParagraph(parts, html) {
-  if (!parts.length) return;
-  html.push(`<p>${renderInline(parts.join(" "))}</p>`);
-  parts.length = 0;
-}
-
 function renderRichText(text) {
-  const lines = String(text || "").split(/\r?\n/);
-  const html = [];
-  const paragraph = [];
-  let inCode = false;
-  let codeLines = [];
-  let listType = null;
-  let listItems = [];
+  if (!window.marked || !window.DOMPurify) return escapeHtml(text || "");
 
-  function flushList() {
-    if (!listType) return;
-    html.push(`<${listType}>${listItems.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${listType}>`);
-    listType = null;
-    listItems = [];
-  }
+  const mathBlocks = [];
+  const mathInlines = [];
+  const source = String(text || "")
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_match, formula) => {
+      const token = `@@MATH_BLOCK_${mathBlocks.length}@@`;
+      mathBlocks.push(formula);
+      return `\n\n${token}\n\n`;
+    })
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_match, formula) => {
+      const token = `@@MATH_BLOCK_${mathBlocks.length}@@`;
+      mathBlocks.push(formula);
+      return `\n\n${token}\n\n`;
+    })
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula) => {
+      const token = `@@MATH_INLINE_${mathInlines.length}@@`;
+      mathInlines.push(formula);
+      return token;
+    })
+    .replace(/(^|[^$])\$([^$\n]+?)\$/g, (_match, prefix, formula) => {
+      const token = `@@MATH_INLINE_${mathInlines.length}@@`;
+      mathInlines.push(formula);
+      return `${prefix}${token}`;
+    });
 
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
-
-    if (line.trim().startsWith("```")) {
-      if (inCode) {
-        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-        codeLines = [];
-        inCode = false;
-      } else {
-        appendParagraph(paragraph, html);
-        flushList();
-        inCode = true;
+  window.marked.setOptions({
+    breaks: true,
+    gfm: true,
+    highlight(code, language) {
+      if (!window.hljs) return escapeHtml(code);
+      if (language && window.hljs.getLanguage(language)) {
+        return window.hljs.highlight(code, { language }).value;
       }
-      continue;
+      return window.hljs.highlightAuto(code).value;
     }
+  });
 
-    if (inCode) {
-      codeLines.push(rawLine);
-      continue;
-    }
+  let html = window.marked.parse(source);
+  html = html.replace(/@@MATH_BLOCK_(\d+)@@/g, (_match, index) => renderMath(mathBlocks[Number(index)], true));
+  html = html.replace(/@@MATH_INLINE_(\d+)@@/g, (_match, index) => renderMath(mathInlines[Number(index)], false));
 
-    if (!line.trim()) {
-      appendParagraph(paragraph, html);
-      flushList();
-      continue;
-    }
+  return window.DOMPurify.sanitize(html, {
+    ADD_TAGS: ["math", "semantics", "mrow", "mi", "mo", "mn", "msup", "msub", "mfrac", "annotation"],
+    ADD_ATTR: ["class", "style", "aria-hidden", "focusable", "xmlns", "encoding"]
+  });
+}
 
-    if (/^---+$/.test(line.trim())) {
-      appendParagraph(paragraph, html);
-      flushList();
-      html.push("<hr>");
-      continue;
-    }
-
-    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-    if (heading) {
-      appendParagraph(paragraph, html);
-      flushList();
-      const level = heading[1].length + 2;
-      html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-      continue;
-    }
-
-    const bullet = /^\s*[-*]\s+(.+)$/.exec(line);
-    if (bullet) {
-      appendParagraph(paragraph, html);
-      if (listType && listType !== "ul") flushList();
-      listType = "ul";
-      listItems.push(bullet[1]);
-      continue;
-    }
-
-    const ordered = /^\s*\d+\.\s+(.+)$/.exec(line);
-    if (ordered) {
-      appendParagraph(paragraph, html);
-      if (listType && listType !== "ol") flushList();
-      listType = "ol";
-      listItems.push(ordered[1]);
-      continue;
-    }
-
-    flushList();
-    paragraph.push(line.trim());
+function renderMath(formula, displayMode) {
+  if (!window.katex) return `<code>${escapeHtml(formula || "")}</code>`;
+  try {
+    return window.katex.renderToString(String(formula || "").trim(), {
+      displayMode,
+      throwOnError: false,
+      strict: "ignore",
+      output: "html"
+    });
+  } catch {
+    return `<code>${escapeHtml(formula || "")}</code>`;
   }
+}
 
-  if (inCode) html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-  appendParagraph(paragraph, html);
-  flushList();
-  return html.join("");
+function enhanceRichContent(root) {
+  if (!root || !window.hljs) return;
+  root.querySelectorAll("pre code").forEach((block) => {
+    window.hljs.highlightElement(block);
+  });
 }
 
 function extractTextContent(content) {
@@ -750,6 +717,7 @@ function addMessage(role, text, images = []) {
   if (role === "assistant") {
     bubble.classList.add("rich");
     bubble.innerHTML = renderRichText(text || "");
+    enhanceRichContent(bubble);
   } else {
     bubble.textContent = text || "";
   }
