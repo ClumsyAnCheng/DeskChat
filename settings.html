@@ -59,6 +59,22 @@
           </label>
         </section>
 
+        <section class="settings-section">
+          <label class="check standalone-check">
+            <input id="ragflowEnabled" type="checkbox" />
+            <span>Enable RAGFlow knowledge graph engine</span>
+          </label>
+
+          <label for="ragflowBaseUrl">RAGFlow Base URL</label>
+          <input id="ragflowBaseUrl" autocomplete="off" placeholder="http://localhost:9380" />
+
+          <label for="ragflowApiKey">RAGFlow API Key</label>
+          <input id="ragflowApiKey" type="password" autocomplete="off" />
+
+          <label for="ragflowDatasetId">RAGFlow Dataset ID</label>
+          <input id="ragflowDatasetId" autocomplete="off" />
+        </section>
+
         <footer class="settings-actions">
           <button id="resetProvider" type="button" class="secondary">恢复当前服务商默认值</button>
           <button id="saveSettings" type="submit">保存配置</button>

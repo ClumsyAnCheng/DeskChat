@@ -67,6 +67,13 @@ const defaultApiConfig = {
   systemPrompt: defaultSystemPrompt
 };
 
+const defaultRagflowConfig = {
+  enabled: false,
+  baseUrl: "http://localhost:9380",
+  apiKey: "",
+  datasetId: ""
+};
+
 function makeId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -117,7 +124,15 @@ function normalizeSettingsStore(raw) {
   });
 
   if (!configs.some((config) => config.id === activeConfigId)) activeConfigId = configs[0].id;
-  return { activeConfigId, apiConfigs: configs };
+  const ragflow = {
+    ...defaultRagflowConfig,
+    ...((raw && raw.ragflow) || {})
+  };
+  ragflow.enabled = Boolean(ragflow.enabled);
+  ragflow.baseUrl = String(ragflow.baseUrl || defaultRagflowConfig.baseUrl).replace(/\/+$/, "");
+  ragflow.apiKey = String(ragflow.apiKey || "");
+  ragflow.datasetId = String(ragflow.datasetId || "");
+  return { activeConfigId, apiConfigs: configs, ragflow };
 }
 
 function settingsPath() {
@@ -130,7 +145,7 @@ function readSettingsStore() {
 
 function activeSettings(store = readSettingsStore()) {
   const active = store.apiConfigs.find((config) => config.id === store.activeConfigId) || store.apiConfigs[0];
-  return { ...active, activeConfigId: store.activeConfigId, apiConfigs: store.apiConfigs };
+  return { ...active, activeConfigId: store.activeConfigId, apiConfigs: store.apiConfigs, ragflow: store.ragflow || defaultRagflowConfig };
 }
 
 function persistSettingsStore(store) {
@@ -505,6 +520,7 @@ function normalizeKnowledgeFile(file) {
     textPreview: file && file.textPreview ? String(file.textPreview).slice(0, 16000) : fullText.slice(0, 16000),
     fullText: fullText.slice(0, 500000),
     chunks,
+    ragflowDocumentId: file && file.ragflowDocumentId ? String(file.ragflowDocumentId) : "",
     indexStats: {
       chunkCount: chunks.length,
       tokenCount: chunks.reduce((total, chunk) => total + (Array.isArray(chunk.tokens) ? chunk.tokens.length : 0), 0),
@@ -900,6 +916,188 @@ async function getKnowledgeMindMap(knowledgeBaseId, fileId) {
   };
 }
 
+function ragflowConfig() {
+  const settings = readSettingsStore();
+  return settings.ragflow || defaultRagflowConfig;
+}
+
+function normalizeRagflowGraph(raw) {
+  const source = raw && raw.data ? raw.data : raw;
+  const graph = source && source.graph ? source.graph : source;
+  const rawNodes = Array.isArray(graph && graph.nodes) ? graph.nodes : [];
+  const rawLinks = Array.isArray(graph && graph.edges)
+    ? graph.edges
+    : Array.isArray(graph && graph.links)
+      ? graph.links
+      : [];
+  const nodes = rawNodes.map((node, index) => {
+    const id = String(node.id || node.entity_id || node.entity_name || node.name || node.label || index);
+    const label = String(node.label || node.entity_name || node.name || node.title || id);
+    return {
+      id,
+      label,
+      title: String(node.title || label),
+      type: String(node.type || node.category || "concept"),
+      detail: String(node.description || node.detail || node.summary || "")
+    };
+  });
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const links = rawLinks
+    .map((link) => ({
+      source: String(link.src_id || link.source_id || link.source || link.from || link.src || ""),
+      target: String(link.tgt_id || link.target_id || link.target || link.to || link.dst || ""),
+      label: String(link.label || link.type || link.relation || "")
+    }))
+    .filter((link) => nodeIds.has(link.source) && nodeIds.has(link.target));
+  return { nodes, links };
+}
+
+async function ragflowRequest(config, apiPath, options = {}) {
+  const baseUrl = String(config.baseUrl || "").replace(/\/+$/, "");
+  if (!baseUrl) throw new Error("RAGFlow base URL is empty.");
+  const response = await fetch(`${baseUrl}${apiPath}`, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${config.apiKey}`,
+      Accept: "application/json"
+    }
+  });
+  const text = await response.text();
+  let body = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+  if (!response.ok) {
+    const message = body && body.message ? body.message : text || response.statusText;
+    throw new Error(`RAGFlow ${response.status}: ${message}`);
+  }
+  if (body && typeof body === "object" && body.code !== undefined && Number(body.code) !== 0) {
+    throw new Error(body.message || `RAGFlow returned code ${body.code}`);
+  }
+  return body;
+}
+
+async function updateKnowledgeFilePatch(knowledgeBaseId, fileId, patch) {
+  const store = readKnowledgeStore();
+  const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
+  const index = base && base.files.findIndex((item) => item.id === String(fileId || ""));
+  if (!base || index < 0) return null;
+  base.files[index] = normalizeKnowledgeFile({ ...base.files[index], ...patch });
+  persistKnowledgeStore(store);
+  return base.files[index];
+}
+
+async function ensureRagflowDocument(knowledgeBaseId, file) {
+  const config = ragflowConfig();
+  if (!config.enabled || !config.apiKey || !config.datasetId) {
+    return { ok: false, error: "RAGFlow is not configured. Open settings and fill Base URL, API Key, and Dataset ID." };
+  }
+  if (file.ragflowDocumentId) return { ok: true, documentId: file.ragflowDocumentId, uploaded: false };
+  if (!file.storedPath || !fs.existsSync(file.storedPath)) {
+    return { ok: false, error: "Source file is missing, so it cannot be uploaded to RAGFlow." };
+  }
+
+  const form = new FormData();
+  const bytes = fs.readFileSync(file.storedPath);
+  form.append("file", new Blob([bytes], { type: file.type || "application/octet-stream" }), file.name || "document");
+  const upload = await ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/documents`, {
+    method: "POST",
+    body: form
+  });
+  const data = upload && upload.data;
+  const first = Array.isArray(data) ? data[0] : data;
+  const documentId = String((first && (first.id || first.document_id)) || "");
+  if (!documentId) return { ok: false, error: "RAGFlow upload finished but no document id was returned." };
+  await updateKnowledgeFilePatch(knowledgeBaseId, file.id, { ragflowDocumentId: documentId });
+  return { ok: true, documentId, uploaded: true };
+}
+
+async function startRagflowDocumentParse(documentId) {
+  const config = ragflowConfig();
+  return ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/chunks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document_ids: [documentId] })
+  }).catch((error) => ({ code: "parse_start_failed", message: error.message }));
+}
+
+async function enableRagflowKnowledgeGraph() {
+  const config = ragflowConfig();
+  let parserConfig = {};
+  try {
+    const current = await ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}`);
+    parserConfig = {
+      ...((current && current.data && current.data.parser_config) || (current && current.parser_config) || {})
+    };
+  } catch {
+    parserConfig = {};
+  }
+  return ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      parser_config: {
+        ...parserConfig,
+        graphrag: {
+          ...(parserConfig.graphrag || {}),
+          use_graphrag: true
+        }
+      }
+    })
+  }).catch((error) => ({ code: "graph_config_failed", message: error.message }));
+}
+
+async function getRagflowKnowledgeGraph(knowledgeBaseId, fileId) {
+  const store = readKnowledgeStore();
+  const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
+  const file = base && base.files.find((item) => item.id === String(fileId || ""));
+  if (!base || !file) return { ok: false, error: "File not found." };
+
+  const config = ragflowConfig();
+  if (!config.enabled || !config.apiKey || !config.datasetId) {
+    return {
+      ok: false,
+      needsConfig: true,
+      error: "RAGFlow is not configured. Open settings and fill Base URL, API Key, and Dataset ID."
+    };
+  }
+
+  const ensured = await ensureRagflowDocument(base.id, file);
+  if (!ensured.ok) return ensured;
+  if (ensured.uploaded) {
+    await enableRagflowKnowledgeGraph();
+    await startRagflowDocumentParse(ensured.documentId);
+  }
+
+  try {
+    const raw = await ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/knowledge_graph`);
+    const graph = normalizeRagflowGraph(raw);
+    if (!graph.nodes.length) {
+      return {
+        ok: false,
+        pending: true,
+        documentId: ensured.documentId,
+        error: "RAGFlow graph is not ready yet. Finish dataset parsing and GraphRAG build in RAGFlow, then open it again."
+      };
+    }
+    return {
+      ok: true,
+      engine: "ragflow",
+      knowledgeBaseId: base.id,
+      knowledgeBaseName: base.name,
+      fileId: file.id,
+      fileName: file.name,
+      documentId: ensured.documentId,
+      graph
+    };
+  } catch (error) {
+    return { ok: false, documentId: ensured.documentId, error: error.message };
+  }
+}
+
 function getFocusedChatWindow() {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && chatWindows.has(focused)) return focused;
@@ -1205,6 +1403,7 @@ ipcMain.handle("knowledge:search", async (_event, args) =>
   searchKnowledgeBase(args && args.knowledgeBaseId, args && args.query, args && args.options)
 );
 ipcMain.handle("knowledge:mind-map", async (_event, args) => getKnowledgeMindMap(args && args.knowledgeBaseId, args && args.fileId));
+ipcMain.handle("knowledge:graph", async (_event, args) => getRagflowKnowledgeGraph(args && args.knowledgeBaseId, args && args.fileId));
 ipcMain.handle("tool:run-command", async (_event, args) => {
   const command = String(args && args.command ? args.command : "");
   if (!command.trim()) return { ok: false, stderr: "No command supplied.", stdout: "" };

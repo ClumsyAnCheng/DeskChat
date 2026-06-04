@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("deskchat", {
   searchKnowledgeBase: (knowledgeBaseId, query, options) =>
     ipcRenderer.invoke("knowledge:search", { knowledgeBaseId, query, options }),
   getKnowledgeMindMap: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:mind-map", { knowledgeBaseId, fileId }),
+  getKnowledgeGraph: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:graph", { knowledgeBaseId, fileId }),
   onSettingsUpdated: (callback) => {
     ipcRenderer.removeAllListeners("settings:updated");
     ipcRenderer.on("settings:updated", (_event, settings) => callback(settings));

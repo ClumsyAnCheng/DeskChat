@@ -825,6 +825,127 @@ button:disabled {
   display: block;
 }
 
+.knowledge-graph-panel {
+  background: #f8fafc;
+}
+
+.knowledge-graph-layout {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  background: #f8fafc;
+}
+
+.knowledge-graph-canvas-wrap {
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(#e8edf3 1px, transparent 1px),
+    linear-gradient(90deg, #e8edf3 1px, transparent 1px),
+    #f8fafc;
+  background-size: 48px 48px;
+}
+
+.knowledge-graph-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+
+.knowledge-graph-canvas:active {
+  cursor: grabbing;
+}
+
+.knowledge-graph-node {
+  cursor: pointer;
+  transition: opacity 0.18s ease;
+}
+
+.knowledge-graph-node circle {
+  filter: drop-shadow(0 4px 10px rgba(15, 23, 42, 0.18));
+}
+
+.knowledge-graph-node.selected circle {
+  stroke: #0f172a;
+  stroke-width: 4;
+}
+
+.knowledge-graph-node.muted,
+.knowledge-graph-link.muted {
+  opacity: 0.18;
+}
+
+.knowledge-graph-label {
+  fill: #111827;
+  font-size: 12px;
+  font-weight: 700;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: rgba(248, 250, 252, 0.92);
+  stroke-width: 4px;
+  text-anchor: middle;
+}
+
+.knowledge-graph-detail {
+  min-width: 0;
+  overflow: auto;
+  padding: 18px;
+  border-left: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.knowledge-graph-detail-type {
+  width: fit-content;
+  margin-bottom: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.knowledge-graph-detail h3 {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.knowledge-graph-detail p {
+  margin: 0 0 18px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.knowledge-graph-detail strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.knowledge-graph-detail ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-graph-detail li {
+  padding: 7px 0;
+  border-top: 1px solid #eef2f7;
+  color: #334155;
+  font-size: 13px;
+}
+
 .danger-text {
   color: var(--danger);
 }

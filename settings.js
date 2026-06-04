@@ -35,13 +35,23 @@ const els = {
   systemPrompt: document.getElementById("systemPrompt"),
   enableTools: document.getElementById("enableTools"),
   supportsVision: document.getElementById("supportsVision"),
+  ragflowEnabled: document.getElementById("ragflowEnabled"),
+  ragflowBaseUrl: document.getElementById("ragflowBaseUrl"),
+  ragflowApiKey: document.getElementById("ragflowApiKey"),
+  ragflowDatasetId: document.getElementById("ragflowDatasetId"),
   resetProvider: document.getElementById("resetProvider"),
   saveSettings: document.getElementById("saveSettings")
 };
 
 let settingsStore = {
   activeConfigId: "default-openai",
-  apiConfigs: []
+  apiConfigs: [],
+  ragflow: {
+    enabled: false,
+    baseUrl: "http://localhost:9380",
+    apiKey: "",
+    datasetId: ""
+  }
 };
 let activeConfigId = "default-openai";
 
@@ -73,7 +83,8 @@ function applySettings(next) {
   const configs = Array.isArray(next.apiConfigs) ? next.apiConfigs : [next];
   settingsStore = {
     activeConfigId: next.activeConfigId || next.id || (configs[0] && configs[0].id) || "default-openai",
-    apiConfigs: configs.map(normalizeConfig)
+    apiConfigs: configs.map(normalizeConfig),
+    ragflow: normalizeRagflow(next.ragflow)
   };
   activeConfigId = settingsStore.activeConfigId;
   if (!settingsStore.apiConfigs.some((config) => config.id === activeConfigId)) {
@@ -81,6 +92,16 @@ function applySettings(next) {
   }
   renderConfigSelect();
   fillForm(activeConfig());
+  fillRagflowForm(settingsStore.ragflow);
+}
+
+function normalizeRagflow(config) {
+  return {
+    enabled: Boolean(config && config.enabled),
+    baseUrl: (config && config.baseUrl) || "http://localhost:9380",
+    apiKey: (config && config.apiKey) || "",
+    datasetId: (config && config.datasetId) || ""
+  };
 }
 
 function renderConfigSelect() {
@@ -133,6 +154,23 @@ function collectFormConfig() {
   });
 }
 
+function fillRagflowForm(config) {
+  const next = normalizeRagflow(config);
+  els.ragflowEnabled.checked = next.enabled;
+  els.ragflowBaseUrl.value = next.baseUrl;
+  els.ragflowApiKey.value = next.apiKey;
+  els.ragflowDatasetId.value = next.datasetId;
+}
+
+function collectRagflowConfig() {
+  return normalizeRagflow({
+    enabled: els.ragflowEnabled.checked,
+    baseUrl: els.ragflowBaseUrl.value.trim().replace(/\/+$/, ""),
+    apiKey: els.ragflowApiKey.value.trim(),
+    datasetId: els.ragflowDatasetId.value.trim()
+  });
+}
+
 function updateActiveConfigFromForm() {
   const index = settingsStore.apiConfigs.findIndex((config) => config.id === activeConfigId);
   const nextConfig = collectFormConfig();
@@ -142,6 +180,7 @@ function updateActiveConfigFromForm() {
     settingsStore.apiConfigs.push(nextConfig);
   }
   settingsStore.activeConfigId = activeConfigId;
+  settingsStore.ragflow = collectRagflowConfig();
 }
 
 function applyProviderDefaults() {

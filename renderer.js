@@ -47,6 +47,8 @@ let knowledgePickerOpen = false;
 let activeMenuGroup = null;
 let mindMapPanel = null;
 let activeMindMap = null;
+let knowledgeGraphPanel = null;
+let activeKnowledgeGraphSimulation = null;
 let windowState = { compact: false, pinned: false };
 let currentSettings = { ...window.DeskchatConfig.DEFAULT_SETTINGS };
 
@@ -172,6 +174,15 @@ function closeMindMapPanel() {
   mindMapPanel = null;
 }
 
+function closeKnowledgeGraphPanel() {
+  if (activeKnowledgeGraphSimulation && typeof activeKnowledgeGraphSimulation.stop === "function") {
+    activeKnowledgeGraphSimulation.stop();
+  }
+  activeKnowledgeGraphSimulation = null;
+  if (knowledgeGraphPanel) knowledgeGraphPanel.remove();
+  knowledgeGraphPanel = null;
+}
+
 function downloadText(filename, text, mime = "text/plain") {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -237,6 +248,176 @@ async function openMindMapPanel(knowledgeBaseId, fileId) {
     const filename = `${result.fileName.replace(/\.[^.]+$/, "") || "mindmap"}.md`;
     downloadText(filename, result.markdown, "text/markdown");
   });
+}
+
+function renderKnowledgeGraph(panel, result) {
+  const d3 = window.d3;
+  const graph = result.graph || { nodes: [], links: [] };
+  const svg = panel.querySelector(".knowledge-graph-canvas");
+  const detail = panel.querySelector(".knowledge-graph-detail");
+  const width = Math.max(720, svg.clientWidth || 900);
+  const height = Math.max(480, svg.clientHeight || 620);
+  const nodes = graph.nodes.map((node) => ({ ...node }));
+  const links = graph.links.map((link) => ({ ...link }));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
+  function neighborsOf(id) {
+    const ids = new Set([id]);
+    for (const link of links) {
+      const source = typeof link.source === "object" ? link.source.id : link.source;
+      const target = typeof link.target === "object" ? link.target.id : link.target;
+      if (source === id) ids.add(target);
+      if (target === id) ids.add(source);
+    }
+    return ids;
+  }
+
+  function nodeRadius(node) {
+    if (node.type === "root") return 34;
+    if (node.type === "section" || node.type === "chapter") return 24;
+    return 12;
+  }
+
+  function nodeColor(node) {
+    if (node.type === "root") return "#10b981";
+    if (node.type === "section" || node.type === "chapter") return "#64748b";
+    if (node.type === "entity") return "#f97316";
+    return "#2563eb";
+  }
+
+  function showDetail(node) {
+    const linked = Array.from(neighborsOf(node.id))
+      .filter((id) => id !== node.id)
+      .map((id) => nodeById.get(id))
+      .filter(Boolean)
+      .slice(0, 12);
+    detail.innerHTML = `
+      <div class="knowledge-graph-detail-type">${escapeHtml(node.type || "concept")}</div>
+      <h3>${escapeHtml(node.title || node.label || node.id)}</h3>
+      <p>${escapeHtml(node.detail || node.description || "No detail returned by RAGFlow yet.")}</p>
+      <strong>Related</strong>
+      <ul>${linked.map((item) => `<li>${escapeHtml(item.title || item.label || item.id)}</li>`).join("") || "<li>None</li>"}</ul>
+    `;
+    const neighborIds = neighborsOf(node.id);
+    panel.querySelectorAll(".knowledge-graph-node").forEach((item) => {
+      item.classList.toggle("muted", !neighborIds.has(item.dataset.nodeId));
+      item.classList.toggle("selected", item.dataset.nodeId === node.id);
+    });
+    panel.querySelectorAll(".knowledge-graph-link").forEach((item) => {
+      item.classList.toggle("muted", item.dataset.source !== node.id && item.dataset.target !== node.id);
+    });
+  }
+
+  d3.select(svg).selectAll("*").remove();
+  const root = d3.select(svg).attr("viewBox", [-width / 2, -height / 2, width, height]);
+  const zoomLayer = root.append("g");
+  root.call(d3.zoom().scaleExtent([0.25, 4]).on("zoom", (event) => zoomLayer.attr("transform", event.transform)));
+
+  const link = zoomLayer
+    .append("g")
+    .attr("stroke", "#cbd5e1")
+    .attr("stroke-opacity", 0.8)
+    .selectAll("line")
+    .data(links)
+    .join("line")
+    .attr("class", "knowledge-graph-link")
+    .attr("data-source", (item) => item.source)
+    .attr("data-target", (item) => item.target);
+
+  const node = zoomLayer
+    .append("g")
+    .selectAll("g")
+    .data(nodes)
+    .join("g")
+    .attr("class", "knowledge-graph-node")
+    .attr("data-node-id", (item) => item.id)
+    .on("click", (_event, item) => showDetail(item))
+    .call(d3.drag()
+      .on("start", (event) => {
+        if (!event.active) activeKnowledgeGraphSimulation.alphaTarget(0.25).restart();
+        event.subject.fx = event.subject.x;
+        event.subject.fy = event.subject.y;
+      })
+      .on("drag", (event) => {
+        event.subject.fx = event.x;
+        event.subject.fy = event.y;
+      })
+      .on("end", (event) => {
+        if (!event.active) activeKnowledgeGraphSimulation.alphaTarget(0);
+        event.subject.fx = null;
+        event.subject.fy = null;
+      }));
+
+  node.append("circle")
+    .attr("r", nodeRadius)
+    .attr("fill", nodeColor)
+    .attr("stroke", "#ffffff")
+    .attr("stroke-width", 3);
+
+  node.append("text")
+    .attr("class", "knowledge-graph-label")
+    .attr("dy", (item) => nodeRadius(item) + 15)
+    .text((item) => item.label || item.title || item.id);
+
+  activeKnowledgeGraphSimulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id((item) => item.id).distance((item) => (item.source.type === "root" ? 150 : 92)))
+    .force("charge", d3.forceManyBody().strength(-420))
+    .force("center", d3.forceCenter(0, 0))
+    .force("collision", d3.forceCollide().radius((item) => nodeRadius(item) + 28))
+    .on("tick", () => {
+      link
+        .attr("x1", (item) => item.source.x)
+        .attr("y1", (item) => item.source.y)
+        .attr("x2", (item) => item.target.x)
+        .attr("y2", (item) => item.target.y);
+      node.attr("transform", (item) => `translate(${item.x},${item.y})`);
+    });
+
+  if (nodes[0]) showDetail(nodes[0]);
+  panel.querySelector('[data-action="download-json"]').addEventListener("click", () => {
+    const filename = `${result.fileName.replace(/\.[^.]+$/, "") || "knowledge-graph"}.json`;
+    downloadText(filename, JSON.stringify(result.graph, null, 2), "application/json");
+  });
+}
+
+async function openKnowledgeGraphPanel(knowledgeBaseId, fileId) {
+  closeKnowledgeGraphPanel();
+  const result = await window.deskchat.getKnowledgeGraph(knowledgeBaseId, fileId);
+  if (!result || !result.ok) {
+    addMessage("assistant", result && result.error ? result.error : "Knowledge graph failed.");
+    if (result && result.needsConfig) window.deskchat.openSettings();
+    return;
+  }
+
+  knowledgeGraphPanel = document.createElement("section");
+  knowledgeGraphPanel.className = "mindmap-panel knowledge-graph-panel";
+  knowledgeGraphPanel.innerHTML = `
+    <header class="mindmap-header">
+      <div>
+        <strong>${escapeHtml(result.fileName)}</strong>
+        <span>${escapeHtml(result.knowledgeBaseName)} / RAGFlow Knowledge Graph</span>
+      </div>
+      <div class="mindmap-actions">
+        <button type="button" data-action="download-json">Export JSON</button>
+        <button type="button" data-action="close">Close</button>
+      </div>
+    </header>
+    <div class="knowledge-graph-layout">
+      <div class="knowledge-graph-canvas-wrap">
+        <svg class="knowledge-graph-canvas"></svg>
+      </div>
+      <aside class="knowledge-graph-detail"></aside>
+    </div>
+  `;
+  document.body.appendChild(knowledgeGraphPanel);
+
+  if (!window.d3) {
+    addMessage("assistant", "D3 is not loaded. Restart the app and try again.");
+    closeKnowledgeGraphPanel();
+    return;
+  }
+  renderKnowledgeGraph(knowledgeGraphPanel, result);
+  knowledgeGraphPanel.querySelector('[data-action="close"]').addEventListener("click", closeKnowledgeGraphPanel);
 }
 
 function closeAppMenus() {
@@ -554,6 +735,16 @@ function renderConversationList() {
         open.innerHTML = `<span class="file-icon">□</span><span>${escapeHtml(file.name)}</span><small>${formatFileSize(file.size)}</small>`;
         open.addEventListener("click", () => window.deskchat.openKnowledgeFile(base.id, file.id));
 
+        const knowledgeGraph = document.createElement("button");
+        knowledgeGraph.type = "button";
+        knowledgeGraph.className = "row-action";
+        knowledgeGraph.textContent = "Graph";
+        knowledgeGraph.title = "Open RAGFlow knowledge graph";
+        knowledgeGraph.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await openKnowledgeGraphPanel(base.id, file.id);
+        });
+
         const mindMap = document.createElement("button");
         mindMap.type = "button";
         mindMap.className = "row-action";
@@ -574,7 +765,7 @@ function renderConversationList() {
           await window.deskchat.removeKnowledgeFile(base.id, file.id);
         });
 
-        row.append(open, mindMap, removeFile);
+        row.append(open, knowledgeGraph, mindMap, removeFile);
         children.appendChild(row);
       }
 
@@ -1247,6 +1438,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (knowledgeGraphPanel) closeKnowledgeGraphPanel();
   if (mindMapPanel) closeMindMapPanel();
   if (knowledgePickerOpen) closeKnowledgePicker();
   if (activeMenuGroup) closeAppMenus();
