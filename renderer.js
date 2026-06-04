@@ -218,12 +218,18 @@ async function openMindMapPanel(knowledgeBaseId, fileId) {
     return;
   }
 
-  activeMindMap = Markmap.create(svg, {
-    autoFit: true,
-    colorFreezeLevel: 2,
-    duration: 220,
-    maxWidth: 360
-  }, result.root);
+  try {
+    activeMindMap = Markmap.create(svg, {
+      autoFit: true,
+      colorFreezeLevel: 2,
+      duration: 220,
+      maxWidth: 360
+    }, result.root);
+  } catch (error) {
+    addMessage("assistant", `思维导图渲染失败：${error.message}`);
+    closeMindMapPanel();
+    return;
+  }
 
   mindMapPanel.querySelector('[data-action="close"]').addEventListener("click", closeMindMapPanel);
   mindMapPanel.querySelector('[data-action="fit"]').addEventListener("click", () => activeMindMap && activeMindMap.fit());
@@ -553,7 +559,6 @@ function renderConversationList() {
         mindMap.className = "row-action";
         mindMap.textContent = "导图";
         mindMap.title = "根据文件生成思维导图";
-        mindMap.disabled = !(file.textPreview || file.fullText || (file.indexStats && file.indexStats.chunkCount));
         mindMap.addEventListener("click", async (event) => {
           event.stopPropagation();
           await openMindMapPanel(base.id, file.id);
