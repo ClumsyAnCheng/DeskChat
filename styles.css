@@ -946,6 +946,96 @@ button:disabled {
   font-size: 13px;
 }
 
+.knowledge-graph-status {
+  min-width: 0;
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  background: #f8fafc;
+}
+
+.knowledge-graph-status h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.knowledge-graph-status p {
+  max-width: 720px;
+  margin: 0;
+  white-space: pre-wrap;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.knowledge-graph-status strong {
+  color: #0f766e;
+  font-size: 13px;
+}
+
+.knowledge-graph-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.knowledge-graph-meta span {
+  padding: 4px 8px;
+  border: 1px solid #dbe4ee;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.knowledge-graph-status button {
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.knowledge-graph-status button:hover:not(:disabled) {
+  background: #eef2f6;
+}
+
+.knowledge-graph-issue {
+  background: #fff7ed;
+}
+
+.knowledge-graph-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.knowledge-graph-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #dbe4ee;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: graph-spin 0.9s linear infinite;
+}
+
+@keyframes graph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .danger-text {
   color: var(--danger);
 }

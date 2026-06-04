@@ -937,7 +937,7 @@ function normalizeRagflowGraph(raw) {
       id,
       label,
       title: String(node.title || label),
-      type: String(node.type || node.category || "concept"),
+      type: String(node.type || node.entity_type || node.category || "concept"),
       detail: String(node.description || node.detail || node.summary || "")
     };
   });
@@ -946,7 +946,7 @@ function normalizeRagflowGraph(raw) {
     .map((link) => ({
       source: String(link.src_id || link.source_id || link.source || link.from || link.src || ""),
       target: String(link.tgt_id || link.target_id || link.target || link.to || link.dst || ""),
-      label: String(link.label || link.type || link.relation || "")
+      label: String(link.label || link.type || link.relation || link.description || "")
     }))
     .filter((link) => nodeIds.has(link.source) && nodeIds.has(link.target));
   return { nodes, links };
@@ -972,12 +972,226 @@ async function ragflowRequest(config, apiPath, options = {}) {
   }
   if (!response.ok) {
     const message = body && body.message ? body.message : text || response.statusText;
-    throw new Error(`RAGFlow ${response.status}: ${message}`);
+    const error = new Error(`RAGFlow ${response.status}: ${message}`);
+    error.status = response.status;
+    error.apiPath = apiPath;
+    error.body = body;
+    throw error;
   }
   if (body && typeof body === "object" && body.code !== undefined && Number(body.code) !== 0) {
-    throw new Error(body.message || `RAGFlow returned code ${body.code}`);
+    const error = new Error(body.message || `RAGFlow returned code ${body.code}`);
+    error.ragflowCode = body.code;
+    error.apiPath = apiPath;
+    error.body = body;
+    throw error;
   }
   return body;
+}
+
+function canTryRagflowFallback(error) {
+  return error && (error.status === 404 || error.status === 405);
+}
+
+function classifyRagflowError(error) {
+  const message = String(error && error.message ? error.message : error || "");
+  if (error && (error.status === 401 || error.status === 403) || /authorization|authentication|api key|token/i.test(message)) {
+    return "auth";
+  }
+  if (error && error.status === 404 || /dataset.*not found|can't find this dataset|datasets not found|invalid dataset/i.test(message)) {
+    return "dataset";
+  }
+  if (/embedding|embd|llm|model|provider|api key/i.test(message)) {
+    return "model";
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|network|connect/i.test(message)) {
+    return "service";
+  }
+  return "unknown";
+}
+
+function buildRagflowSetupIssue(kind, detail = "") {
+  const details = detail ? `\n\nDetail: ${detail}` : "";
+  if (kind === "service") {
+    return {
+      ok: false,
+      needsConfig: true,
+      diagnosis: { kind, detail },
+      error: `RAGFlow is not reachable. Start Docker/RAGFlow first, then refresh the graph.${details}`
+    };
+  }
+  if (kind === "auth") {
+    return {
+      ok: false,
+      needsConfig: true,
+      diagnosis: { kind, detail },
+      error: `RAGFlow API Key is invalid or missing. Create/copy an API key in RAGFlow and save it in Deskchat Settings.${details}`
+    };
+  }
+  if (kind === "dataset") {
+    return {
+      ok: false,
+      needsConfig: true,
+      diagnosis: { kind, detail },
+      error: `RAGFlow Dataset ID is missing or not accessible. Create a dataset in RAGFlow, copy its ID, and save it in Deskchat Settings.${details}`
+    };
+  }
+  if (kind === "model") {
+    return {
+      ok: false,
+      needsConfig: true,
+      diagnosis: { kind, detail },
+      error: `RAGFlow dataset is not ready for parsing/GraphRAG. Configure a model provider, default chat model, and embedding model in RAGFlow, then create or update the dataset.${details}`
+    };
+  }
+  return {
+    ok: false,
+    diagnosis: { kind, detail },
+    error: detail || "RAGFlow setup check failed."
+  };
+}
+
+async function ragflowRequestFirst(config, candidates, options = {}) {
+  let lastError = null;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const apiPath = candidates[index];
+    try {
+      return await ragflowRequest(config, apiPath, options);
+    } catch (error) {
+      lastError = error;
+      if (index >= candidates.length - 1 || !canTryRagflowFallback(error)) throw error;
+    }
+  }
+  throw lastError || new Error("RAGFlow request failed.");
+}
+
+async function runRagflowKnowledgeGraph(config = ragflowConfig()) {
+  return ragflowRequestFirst(config, [
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/index?type=graph`,
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/run_graphrag`
+  ], {
+    method: "POST"
+  });
+}
+
+async function traceRagflowKnowledgeGraph(config = ragflowConfig()) {
+  return ragflowRequestFirst(config, [
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/index?type=graph`,
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/trace_graphrag`
+  ]);
+}
+
+async function fetchRagflowKnowledgeGraph(config = ragflowConfig()) {
+  return ragflowRequestFirst(config, [
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/graph`,
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/knowledge_graph`
+  ]);
+}
+
+async function getRagflowDataset(config = ragflowConfig()) {
+  return ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}`);
+}
+
+function normalizeRagflowDataset(raw) {
+  const data = raw && raw.data ? raw.data : raw;
+  if (!data || typeof data !== "object") return null;
+  return {
+    id: String(data.id || ""),
+    name: String(data.name || ""),
+    embdId: String(data.embd_id || data.embedding_model || ""),
+    parserId: String(data.parser_id || data.chunk_method || ""),
+    docCount: Number(data.doc_num ?? data.document_count ?? 0),
+    chunkCount: Number(data.chunk_num ?? data.chunk_count ?? 0),
+    parserConfig: data.parser_config || {}
+  };
+}
+
+async function diagnoseRagflowReadiness(config = ragflowConfig()) {
+  if (!config.enabled) return buildRagflowSetupIssue("dataset", "RAGFlow integration is disabled in Deskchat Settings.");
+  if (!config.baseUrl || !config.apiKey || !config.datasetId) {
+    return buildRagflowSetupIssue("dataset", "Base URL, API Key, and Dataset ID are required.");
+  }
+
+  try {
+    const dataset = normalizeRagflowDataset(await getRagflowDataset(config));
+    if (!dataset || !dataset.id) return buildRagflowSetupIssue("dataset", "Dataset lookup returned no dataset data.");
+    if (!dataset.embdId) {
+      return buildRagflowSetupIssue("model", `Dataset "${dataset.name || config.datasetId}" has no embedding model.`);
+    }
+    return { ok: true, dataset };
+  } catch (error) {
+    return buildRagflowSetupIssue(classifyRagflowError(error), error.message);
+  }
+}
+
+function normalizeRagflowGraphTrace(raw) {
+  const data = raw && raw.data ? raw.data : raw;
+  const trace = Array.isArray(data) ? data[0] : data;
+  if (!trace || typeof trace !== "object") return null;
+  const progress = Number(trace.progress);
+  const progressText = Number.isFinite(progress) ? `${Math.round(progress * 100)}%` : "";
+  const message = String(trace.progress_msg || trace.message || trace.status || "").trim();
+  const failed = Number.isFinite(progress) && progress < 0;
+  return {
+    id: String(trace.id || trace.task_id || trace.graphrag_task_id || ""),
+    progress: Number.isFinite(progress) ? progress : null,
+    progressText,
+    message,
+    done: Number.isFinite(progress) && progress >= 1,
+    failed
+  };
+}
+
+function normalizeRagflowDocument(raw, documentId = "") {
+  const data = raw && raw.data ? raw.data : raw;
+  const items = Array.isArray(data)
+    ? data
+    : data && Array.isArray(data.docs)
+      ? data.docs
+      : data && Array.isArray(data.documents)
+        ? data.documents
+        : data && Array.isArray(data.data)
+          ? data.data
+          : data
+            ? [data]
+            : [];
+  const doc = items.find((item) => String(item && (item.id || item.document_id)) === String(documentId)) || items[0];
+  if (!doc || typeof doc !== "object") return null;
+  const progress = Number(doc.progress);
+  const run = String(doc.run ?? doc.run_status ?? "");
+  const chunkCount = Number(doc.chunk_num ?? doc.chunk_count ?? doc.chunkCount ?? 0);
+  return {
+    id: String(doc.id || doc.document_id || documentId || ""),
+    name: String(doc.name || ""),
+    run,
+    progress: Number.isFinite(progress) ? progress : null,
+    progressText: Number.isFinite(progress) ? `${Math.round(progress * 100)}%` : "",
+    progressMessage: String(doc.progress_msg || doc.message || "").trim(),
+    chunkCount,
+    tokenCount: Number(doc.token_num ?? doc.token_count ?? 0),
+    error: String(doc.error || doc.error_msg || "")
+  };
+}
+
+function ragflowDocumentStage(doc) {
+  if (!doc) return "unknown";
+  if (doc.progress !== null && doc.progress < 0) return "failed";
+  if (doc.error) return "failed";
+  if (doc.run === "3" || /fail|error/i.test(doc.run)) return "failed";
+  if (doc.run === "1" || doc.run === "2" || (doc.progress !== null && doc.progress > 0 && doc.progress < 1)) return "parsing";
+  if (doc.run === "0" || doc.run === "" || doc.run === "null") return doc.chunkCount > 0 ? "ready" : "unparsed";
+  if (doc.run === "4" || doc.progress >= 1 || doc.chunkCount > 0) return "ready";
+  return "unknown";
+}
+
+async function getRagflowDocument(config, documentId) {
+  return ragflowRequestFirst(config, [
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/documents?id=${encodeURIComponent(documentId)}&page_size=1`,
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/documents/${encodeURIComponent(documentId)}`
+  ]);
+}
+
+function isRagflowTaskRunningError(error) {
+  return /already running|in progress/i.test(String(error && error.message ? error.message : ""));
 }
 
 async function updateKnowledgeFilePatch(knowledgeBaseId, fileId, patch) {
@@ -1017,11 +1231,41 @@ async function ensureRagflowDocument(knowledgeBaseId, file) {
 
 async function startRagflowDocumentParse(documentId) {
   const config = ragflowConfig();
-  return ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/chunks`, {
+  return ragflowRequestFirst(config, [
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/documents/parse`,
+    `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/chunks`,
+    "/api/v1/documents/ingest"
+  ], {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document_ids: [documentId] })
+    body: JSON.stringify({ doc_ids: [documentId], document_ids: [documentId], run: 1, apply_kb: true })
   }).catch((error) => ({ code: "parse_start_failed", message: error.message }));
+}
+
+function buildRagflowDocumentPending(documentId, document, parseResult = null) {
+  const stage = ragflowDocumentStage(document);
+  const suffix = document && document.progressMessage ? ` ${document.progressMessage.split("\n").slice(-1)[0]}` : "";
+  if (stage === "failed") {
+    return {
+      ok: false,
+      documentId,
+      documentStatus: document,
+      error: document && (document.error || document.progressMessage)
+        ? `RAGFlow document parsing failed. ${document.error || document.progressMessage}`
+        : "RAGFlow document parsing failed. Check the dataset parser/model settings in RAGFlow."
+    };
+  }
+  return {
+    ok: false,
+    pending: true,
+    stage: stage === "unparsed" ? "parsing" : stage,
+    documentId,
+    documentStatus: document,
+    parseStart: parseResult,
+    error: document && document.progressText
+      ? `RAGFlow is parsing this document (${document.progressText}).${suffix}`
+      : "RAGFlow is parsing this document. Refresh after parsing finishes, then GraphRAG can build the graph."
+  };
 }
 
 async function enableRagflowKnowledgeGraph() {
@@ -1065,6 +1309,9 @@ async function getRagflowKnowledgeGraph(knowledgeBaseId, fileId) {
     };
   }
 
+  const readiness = await diagnoseRagflowReadiness(config);
+  if (!readiness.ok) return readiness;
+
   const ensured = await ensureRagflowDocument(base.id, file);
   if (!ensured.ok) return ensured;
   if (ensured.uploaded) {
@@ -1073,14 +1320,70 @@ async function getRagflowKnowledgeGraph(knowledgeBaseId, fileId) {
   }
 
   try {
-    const raw = await ragflowRequest(config, `/api/v1/datasets/${encodeURIComponent(config.datasetId)}/knowledge_graph`);
+    let documentStatus = null;
+    try {
+      documentStatus = normalizeRagflowDocument(await getRagflowDocument(config, ensured.documentId), ensured.documentId);
+      const documentStage = ragflowDocumentStage(documentStatus);
+      if (documentStage === "unparsed") {
+        const parseResult = await startRagflowDocumentParse(ensured.documentId);
+        return buildRagflowDocumentPending(ensured.documentId, documentStatus, parseResult);
+      }
+      if (documentStage === "parsing" || documentStage === "failed") {
+        return buildRagflowDocumentPending(ensured.documentId, documentStatus);
+      }
+    } catch (error) {
+      if (!canTryRagflowFallback(error)) throw error;
+    }
+
+    let trace = null;
+    try {
+      trace = normalizeRagflowGraphTrace(await traceRagflowKnowledgeGraph(config));
+    } catch (error) {
+      if (!canTryRagflowFallback(error)) throw error;
+    }
+
+    const raw = await fetchRagflowKnowledgeGraph(config);
     const graph = normalizeRagflowGraph(raw);
     if (!graph.nodes.length) {
+      let started = null;
+      let startError = null;
+      try {
+        started = await runRagflowKnowledgeGraph(config);
+      } catch (error) {
+        startError = error;
+        if (!isRagflowTaskRunningError(error)) throw error;
+      }
+
+      try {
+        trace = normalizeRagflowGraphTrace(await traceRagflowKnowledgeGraph(config)) || trace;
+      } catch (error) {
+        if (!isRagflowTaskRunningError(startError)) throw error;
+      }
+
+      if (trace && trace.failed) {
+        return {
+          ok: false,
+          documentId: ensured.documentId,
+          documentStatus,
+          graphTrace: trace,
+          error: trace.message || "RAGFlow graph build failed. Check the dataset model and parsing configuration in RAGFlow."
+        };
+      }
+
       return {
         ok: false,
         pending: true,
+        stage: "graph",
         documentId: ensured.documentId,
-        error: "RAGFlow graph is not ready yet. Finish dataset parsing and GraphRAG build in RAGFlow, then open it again."
+        documentStatus,
+        graphTaskId: String((started && started.data && (started.data.task_id || started.data.graphrag_task_id)) || ""),
+        graphTrace: trace,
+        startError: startError ? startError.message : "",
+        error: trace && trace.message
+          ? `RAGFlow graph is building${trace.progressText ? ` (${trace.progressText})` : ""}. ${trace.message.split("\n").slice(-1)[0]}`
+          : startError
+            ? `RAGFlow graph task is already running. ${startError.message}`
+          : "RAGFlow graph is building. Wait for parsing and GraphRAG to finish, then refresh."
       };
     }
     return {
@@ -1091,10 +1394,14 @@ async function getRagflowKnowledgeGraph(knowledgeBaseId, fileId) {
       fileId: file.id,
       fileName: file.name,
       documentId: ensured.documentId,
+      documentStatus,
+      graphTrace: trace,
       graph
     };
   } catch (error) {
-    return { ok: false, documentId: ensured.documentId, error: error.message };
+    const kind = classifyRagflowError(error);
+    const issue = buildRagflowSetupIssue(kind, error.message);
+    return { ...issue, documentId: ensured.documentId };
   }
 }
 

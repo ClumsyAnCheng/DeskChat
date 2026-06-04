@@ -380,44 +380,132 @@ function renderKnowledgeGraph(panel, result) {
   });
 }
 
-async function openKnowledgeGraphPanel(knowledgeBaseId, fileId) {
-  closeKnowledgeGraphPanel();
-  const result = await window.deskchat.getKnowledgeGraph(knowledgeBaseId, fileId);
-  if (!result || !result.ok) {
-    addMessage("assistant", result && result.error ? result.error : "Knowledge graph failed.");
-    if (result && result.needsConfig) window.deskchat.openSettings();
-    return;
-  }
+function setKnowledgeGraphLoading(panel, title, detail) {
+  panel.querySelector(".knowledge-graph-layout").innerHTML = `
+    <div class="knowledge-graph-status">
+      <div class="knowledge-graph-spinner"></div>
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(detail)}</p>
+    </div>
+  `;
+}
 
+function setKnowledgeGraphPending(panel, result, knowledgeBaseId, fileId) {
+  const trace = result && result.graphTrace;
+  const documentStatus = result && result.documentStatus;
+  const isGraphStage = result && result.stage === "graph";
+  const message = trace && trace.message
+    ? trace.message.split("\n").slice(-4).join("\n")
+    : documentStatus && documentStatus.progressMessage
+      ? documentStatus.progressMessage.split("\n").slice(-4).join("\n")
+    : (result && result.error) || "RAGFlow is parsing the document and building the graph.";
+  const progressText = isGraphStage && trace && trace.progressText
+    ? trace.progressText
+    : documentStatus && documentStatus.progressText
+      ? documentStatus.progressText
+      : "";
+  panel.querySelector(".knowledge-graph-layout").innerHTML = `
+    <div class="knowledge-graph-status">
+      <h3>${isGraphStage ? "Knowledge graph is building" : "Document is parsing"}</h3>
+      <p>${escapeHtml(message)}</p>
+      ${progressText ? `<strong>${escapeHtml(progressText)}</strong>` : ""}
+      ${documentStatus ? `
+        <div class="knowledge-graph-meta">
+          <span>Chunks ${escapeHtml(String(documentStatus.chunkCount || 0))}</span>
+          <span>Tokens ${escapeHtml(String(documentStatus.tokenCount || 0))}</span>
+          <span>Run ${escapeHtml(documentStatus.run || "unknown")}</span>
+        </div>
+      ` : ""}
+      <button type="button" data-action="refresh-graph">Refresh</button>
+    </div>
+  `;
+  panel.querySelector('[data-action="refresh-graph"]').addEventListener("click", async () => {
+    await loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId);
+  });
+}
+
+function setKnowledgeGraphIssue(panel, result, knowledgeBaseId, fileId) {
+  const diagnosis = result && result.diagnosis;
+  const titleMap = {
+    service: "RAGFlow is offline",
+    auth: "RAGFlow API key failed",
+    dataset: "RAGFlow dataset is not ready",
+    model: "RAGFlow model setup is incomplete"
+  };
+  const title = titleMap[diagnosis && diagnosis.kind] || "Knowledge graph failed";
+  const message = result && result.error ? result.error : "Knowledge graph failed.";
+  panel.querySelector(".knowledge-graph-layout").innerHTML = `
+    <div class="knowledge-graph-status knowledge-graph-issue">
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(message)}</p>
+      <div class="knowledge-graph-status-actions">
+        ${result && result.needsConfig ? '<button type="button" data-action="open-settings">Open Settings</button>' : ""}
+        <button type="button" data-action="refresh-graph">Refresh</button>
+      </div>
+    </div>
+  `;
+  const settingsButton = panel.querySelector('[data-action="open-settings"]');
+  if (settingsButton) settingsButton.addEventListener("click", () => window.deskchat.openSettings());
+  panel.querySelector('[data-action="refresh-graph"]').addEventListener("click", async () => {
+    await loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId);
+  });
+}
+
+function createKnowledgeGraphPanel(fileName = "Knowledge Graph", knowledgeBaseName = "RAGFlow") {
+  closeKnowledgeGraphPanel();
   knowledgeGraphPanel = document.createElement("section");
   knowledgeGraphPanel.className = "mindmap-panel knowledge-graph-panel";
   knowledgeGraphPanel.innerHTML = `
     <header class="mindmap-header">
       <div>
-        <strong>${escapeHtml(result.fileName)}</strong>
-        <span>${escapeHtml(result.knowledgeBaseName)} / RAGFlow Knowledge Graph</span>
+        <strong>${escapeHtml(fileName)}</strong>
+        <span>${escapeHtml(knowledgeBaseName)} / RAGFlow Knowledge Graph</span>
       </div>
       <div class="mindmap-actions">
-        <button type="button" data-action="download-json">Export JSON</button>
+        <button type="button" data-action="download-json" disabled>Export JSON</button>
         <button type="button" data-action="close">Close</button>
       </div>
     </header>
-    <div class="knowledge-graph-layout">
-      <div class="knowledge-graph-canvas-wrap">
-        <svg class="knowledge-graph-canvas"></svg>
-      </div>
-      <aside class="knowledge-graph-detail"></aside>
-    </div>
+    <div class="knowledge-graph-layout"></div>
   `;
   document.body.appendChild(knowledgeGraphPanel);
+  knowledgeGraphPanel.querySelector('[data-action="close"]').addEventListener("click", closeKnowledgeGraphPanel);
+  return knowledgeGraphPanel;
+}
 
+async function loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId) {
+  setKnowledgeGraphLoading(panel, "Preparing knowledge graph", "Uploading if needed, starting parsing, and checking GraphRAG status.");
+  const result = await window.deskchat.getKnowledgeGraph(knowledgeBaseId, fileId);
+  if (!result || !result.ok) {
+    if (result && result.pending) {
+      setKnowledgeGraphPending(panel, result, knowledgeBaseId, fileId);
+      return;
+    }
+    setKnowledgeGraphIssue(panel, result, knowledgeBaseId, fileId);
+    return;
+  }
+
+  panel.querySelector(".mindmap-header strong").textContent = result.fileName;
+  panel.querySelector(".mindmap-header span").textContent = `${result.knowledgeBaseName} / RAGFlow Knowledge Graph`;
+  panel.querySelector(".knowledge-graph-layout").innerHTML = `
+    <div class="knowledge-graph-canvas-wrap">
+      <svg class="knowledge-graph-canvas"></svg>
+    </div>
+    <aside class="knowledge-graph-detail"></aside>
+  `;
+  const exportButton = panel.querySelector('[data-action="download-json"]');
+  exportButton.disabled = false;
   if (!window.d3) {
     addMessage("assistant", "D3 is not loaded. Restart the app and try again.");
     closeKnowledgeGraphPanel();
     return;
   }
-  renderKnowledgeGraph(knowledgeGraphPanel, result);
-  knowledgeGraphPanel.querySelector('[data-action="close"]').addEventListener("click", closeKnowledgeGraphPanel);
+  renderKnowledgeGraph(panel, result);
+}
+
+async function openKnowledgeGraphPanel(knowledgeBaseId, fileId) {
+  const panel = createKnowledgeGraphPanel();
+  await loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId);
 }
 
 function closeAppMenus() {
