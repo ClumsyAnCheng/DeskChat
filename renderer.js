@@ -42,6 +42,7 @@ let currentConversationId = null;
 let activeKnowledgeBaseId = null;
 let editingItem = null;
 let knowledgePickerOpen = false;
+let activeMenuGroup = null;
 let windowState = { compact: false, pinned: false };
 let currentSettings = { ...window.DeskchatConfig.DEFAULT_SETTINGS };
 
@@ -156,6 +157,25 @@ function closeKnowledgePicker() {
   knowledgePickerOpen = false;
   const existing = document.querySelector(".knowledge-picker");
   if (existing) existing.remove();
+}
+
+function closeAppMenus() {
+  document.querySelectorAll(".menu-group.open").forEach((group) => {
+    group.classList.remove("open");
+    const trigger = group.querySelector(".menu-trigger");
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  });
+  activeMenuGroup = null;
+}
+
+function toggleAppMenu(group) {
+  const wasOpen = group.classList.contains("open");
+  closeAppMenus();
+  if (wasOpen) return;
+  group.classList.add("open");
+  activeMenuGroup = group;
+  const trigger = group.querySelector(".menu-trigger");
+  if (trigger) trigger.setAttribute("aria-expanded", "true");
 }
 
 async function linkCurrentConversationToKnowledgeBase(knowledgeBaseId) {
@@ -1032,6 +1052,17 @@ els.composer.addEventListener("submit", async (event) => {
   await sendMessage(text, images);
 });
 
+document.querySelectorAll(".menu-trigger").forEach((trigger) => {
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAppMenu(trigger.closest(".menu-group"));
+  });
+});
+
+document.querySelectorAll(".menu-popover button").forEach((button) => {
+  button.addEventListener("click", () => closeAppMenus());
+});
+
 els.prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -1040,15 +1071,18 @@ els.prompt.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  if (activeMenuGroup && !activeMenuGroup.contains(event.target)) closeAppMenus();
   if (!knowledgePickerOpen) return;
   const picker = document.querySelector(".knowledge-picker");
-  if (picker && !picker.contains(event.target) && event.target !== els.toolbarLinkKnowledge) {
+  if (picker && !picker.contains(event.target) && !els.toolbarLinkKnowledge.contains(event.target)) {
     closeKnowledgePicker();
   }
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && knowledgePickerOpen) closeKnowledgePicker();
+  if (event.key !== "Escape") return;
+  if (knowledgePickerOpen) closeKnowledgePicker();
+  if (activeMenuGroup) closeAppMenus();
 });
 
 loadSettings().catch((error) => {

@@ -558,20 +558,77 @@ button:disabled {
   color: #b0b5ad;
 }
 
-.toolbar-actions {
+.app-menu {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-.toolbar-actions button {
-  min-height: 32px;
-  padding: 6px 10px;
-  white-space: nowrap;
-  border-radius: 8px;
+.menu-group {
+  position: relative;
+}
+
+.menu-trigger {
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: transparent;
+  color: #374151;
   font-size: 13px;
+  font-weight: 600;
+}
+
+.menu-trigger:hover:not(:disabled),
+.menu-group.open .menu-trigger {
+  background: #e7ecf1;
+  color: #111827;
+}
+
+.menu-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 188px;
+  display: none;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(31, 35, 40, 0.16);
+}
+
+.menu-popover.align-right {
+  right: 0;
+  left: auto;
+}
+
+.menu-group.open .menu-popover {
+  display: grid;
+  gap: 2px;
+}
+
+.menu-popover button {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: transparent;
+  color: #24292f;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.menu-popover button:hover:not(:disabled) {
+  background: #eef2f6;
+  color: #111827;
+}
+
+.menu-popover button:disabled {
+  opacity: 0.45;
 }
 
 .knowledge-picker {
@@ -1028,11 +1085,11 @@ body.compact-mode .toolbar-title .toolbar-separator {
   display: none;
 }
 
-body.compact-mode .toolbar-actions {
+body.compact-mode .app-menu {
   gap: 5px;
 }
 
-body.compact-mode .toolbar-actions button {
+body.compact-mode .menu-trigger {
   min-height: 32px;
   padding: 6px 7px;
   font-size: 12px;

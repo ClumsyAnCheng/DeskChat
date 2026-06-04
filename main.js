@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, shell } = require("electron");
+const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, shell, Menu } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { exec } = require("node:child_process");
@@ -459,7 +459,8 @@ function createWindow(options = {}) {
     minWidth: 920,
     minHeight: 640,
     title: "Deskchat",
-    backgroundColor: "#f6f4ef",
+    autoHideMenuBar: true,
+    backgroundColor: "#f7f8fa",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -467,6 +468,7 @@ function createWindow(options = {}) {
       sandbox: false
     }
   });
+  win.setMenuBarVisibility(false);
 
   chatWindows.add(win);
   windowModes.set(win.id, { compact: false, pinned: false, normalBounds: null });
@@ -494,7 +496,8 @@ function openSettingsWindow() {
     minWidth: 620,
     minHeight: 680,
     title: "API Settings",
-    backgroundColor: "#f6f4ef",
+    autoHideMenuBar: true,
+    backgroundColor: "#f7f8fa",
     parent: getFocusedChatWindow() || undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -503,6 +506,7 @@ function openSettingsWindow() {
       sandbox: false
     }
   });
+  settingsWindow.setMenuBarVisibility(false);
 
   settingsWindow.loadFile("settings.html");
   settingsWindow.on("closed", () => {
@@ -511,6 +515,7 @@ function openSettingsWindow() {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createWindow();
 
   app.on("activate", () => {

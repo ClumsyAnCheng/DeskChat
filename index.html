@@ -49,16 +49,36 @@
             <span id="keyState">未配置 API Key</span>
           </span>
         </div>
-        <div class="toolbar-actions" aria-label="工具栏">
-          <button id="toolbarSettings" type="button" class="secondary">API 配置</button>
-          <button id="toolbarUploadKnowledge" type="button" class="secondary">上传知识</button>
-          <button id="toolbarLinkKnowledge" type="button" class="secondary">加入知识库</button>
-          <button id="toolbarShotButton" type="button" class="secondary">截图</button>
-          <button id="toolbarClearButton" type="button" class="secondary">清空</button>
-          <button id="toolbarNewWindow" type="button" class="secondary">新窗口</button>
-          <button id="toolbarDeleteConversation" type="button" class="secondary danger-text">删除</button>
-          <button id="compactButton" type="button" class="secondary">长条模式</button>
-          <button id="pinButton" type="button" class="secondary">置顶</button>
+        <div class="app-menu" aria-label="应用菜单">
+          <div class="menu-group">
+            <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">应用</button>
+            <div class="menu-popover" role="menu">
+              <button id="toolbarSettings" type="button" role="menuitem">API 配置</button>
+            </div>
+          </div>
+          <div class="menu-group">
+            <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">对话</button>
+            <div class="menu-popover" role="menu">
+              <button id="toolbarShotButton" type="button" role="menuitem">截图</button>
+              <button id="toolbarClearButton" type="button" role="menuitem">清空当前对话</button>
+              <button id="toolbarDeleteConversation" type="button" class="danger-text" role="menuitem">删除当前对话</button>
+            </div>
+          </div>
+          <div class="menu-group">
+            <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">知识库</button>
+            <div class="menu-popover" role="menu">
+              <button id="toolbarUploadKnowledge" type="button" role="menuitem">上传知识</button>
+              <button id="toolbarLinkKnowledge" type="button" role="menuitem">加入知识库</button>
+            </div>
+          </div>
+          <div class="menu-group">
+            <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">窗口</button>
+            <div class="menu-popover align-right" role="menu">
+              <button id="toolbarNewWindow" type="button" role="menuitem">新窗口</button>
+              <button id="compactButton" type="button" role="menuitem">长条模式</button>
+              <button id="pinButton" type="button" role="menuitem">置顶</button>
+            </div>
+          </div>
         </div>
       </header>
 
