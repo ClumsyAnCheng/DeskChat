@@ -12,6 +12,8 @@ yarn-error.log*
 
 settings.json
 conversations.json
+knowledge-bases.json
+knowledge-files/
 *.local
 
 .DS_Store

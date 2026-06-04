@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen } = require("electron");
+const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { exec } = require("node:child_process");
@@ -214,7 +214,235 @@ function deleteConversation(id) {
     activeConversationId: store.activeConversationId === id ? undefined : store.activeConversationId,
     conversations: remaining
   });
-  return persistConversationStore(nextStore);
+  const result = persistConversationStore(nextStore);
+  removeConversationFromKnowledgeBases(id);
+  return result;
+}
+
+function knowledgeBasesPath() {
+  return userDataFile("knowledge-bases.json");
+}
+
+function knowledgeFilesRoot() {
+  return userDataFile("knowledge-files");
+}
+
+function safeFileName(name) {
+  return String(name || "file")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120) || "file";
+}
+
+function normalizeKnowledgeFile(file) {
+  const now = new Date().toISOString();
+  return {
+    id: file && file.id ? String(file.id) : makeId("file"),
+    name: file && file.name ? String(file.name) : "未命名文件",
+    type: file && file.type ? String(file.type) : "application/octet-stream",
+    size: Number(file && file.size) || 0,
+    addedAt: (file && file.addedAt) || now,
+    storedPath: file && file.storedPath ? String(file.storedPath) : "",
+    textPreview: file && file.textPreview ? String(file.textPreview).slice(0, 16000) : ""
+  };
+}
+
+function normalizeKnowledgeBase(base, index = 0) {
+  const now = new Date().toISOString();
+  const conversationIds = Array.isArray(base && base.conversationIds)
+    ? [...new Set(base.conversationIds.map((id) => String(id)))]
+    : [];
+  return {
+    id: base && base.id ? String(base.id) : makeId("kb"),
+    name: base && base.name ? String(base.name) : `知识库 ${index + 1}`,
+    conversationIds,
+    files: Array.isArray(base && base.files) ? base.files.map(normalizeKnowledgeFile) : [],
+    expanded: base && base.expanded !== undefined ? Boolean(base.expanded) : true,
+    createdAt: (base && base.createdAt) || now,
+    updatedAt: (base && base.updatedAt) || now
+  };
+}
+
+function normalizeKnowledgeStore(raw) {
+  let knowledgeBases = raw && Array.isArray(raw.knowledgeBases) ? raw.knowledgeBases.map(normalizeKnowledgeBase) : [];
+  const seen = new Set();
+  knowledgeBases = knowledgeBases.map((base) => {
+    const next = normalizeKnowledgeBase(base);
+    if (seen.has(next.id)) next.id = makeId("kb");
+    seen.add(next.id);
+    return next;
+  });
+
+  let activeKnowledgeBaseId = raw && raw.activeKnowledgeBaseId ? String(raw.activeKnowledgeBaseId) : null;
+  if (activeKnowledgeBaseId && !knowledgeBases.some((base) => base.id === activeKnowledgeBaseId)) {
+    activeKnowledgeBaseId = null;
+  }
+  return { activeKnowledgeBaseId, knowledgeBases };
+}
+
+function readKnowledgeStore() {
+  return normalizeKnowledgeStore(readJson(knowledgeBasesPath(), null));
+}
+
+function persistKnowledgeStore(store) {
+  const normalized = normalizeKnowledgeStore(store);
+  ensureUserDataDir();
+  fs.writeFileSync(knowledgeBasesPath(), JSON.stringify(normalized, null, 2), "utf8");
+  BrowserWindow.getAllWindows().forEach((win) => {
+    win.webContents.send("knowledge:updated", normalized);
+  });
+  return normalized;
+}
+
+function createKnowledgeBase(name = "新知识库") {
+  const store = readKnowledgeStore();
+  const base = normalizeKnowledgeBase({ name }, store.knowledgeBases.length);
+  store.knowledgeBases.unshift(base);
+  store.activeKnowledgeBaseId = base.id;
+  persistKnowledgeStore(store);
+  return base;
+}
+
+function saveKnowledgeBase(payload) {
+  const store = readKnowledgeStore();
+  const now = new Date().toISOString();
+  const id = payload && payload.id ? String(payload.id) : "";
+  const index = store.knowledgeBases.findIndex((base) => base.id === id);
+  if (index < 0) return persistKnowledgeStore(store);
+
+  store.knowledgeBases[index] = normalizeKnowledgeBase({
+    ...store.knowledgeBases[index],
+    ...(payload || {}),
+    id,
+    updatedAt: now
+  }, index);
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "active")) {
+    store.activeKnowledgeBaseId = payload.active ? id : null;
+  }
+  return persistKnowledgeStore(store);
+}
+
+function deleteKnowledgeBase(id) {
+  const store = readKnowledgeStore();
+  const targetId = String(id || "");
+  const remaining = store.knowledgeBases.filter((base) => base.id !== targetId);
+  const result = persistKnowledgeStore({
+    activeKnowledgeBaseId: store.activeKnowledgeBaseId === targetId ? null : store.activeKnowledgeBaseId,
+    knowledgeBases: remaining
+  });
+
+  const root = path.resolve(knowledgeFilesRoot());
+  const target = path.resolve(root, targetId);
+  if (targetId && target.startsWith(root + path.sep) && fs.existsSync(target)) {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+  return result;
+}
+
+function setActiveKnowledgeBase(id) {
+  const store = readKnowledgeStore();
+  const targetId = id ? String(id) : null;
+  store.activeKnowledgeBaseId = store.knowledgeBases.some((base) => base.id === targetId) ? targetId : null;
+  return persistKnowledgeStore(store);
+}
+
+function linkConversationToKnowledgeBase(knowledgeBaseId, conversationId) {
+  const store = readKnowledgeStore();
+  const targetId = String(knowledgeBaseId || "");
+  const chatId = String(conversationId || "");
+  const index = store.knowledgeBases.findIndex((base) => base.id === targetId);
+  if (index < 0 || !chatId) return persistKnowledgeStore(store);
+
+  for (const base of store.knowledgeBases) {
+    base.conversationIds = base.conversationIds.filter((id) => id !== chatId);
+  }
+  store.knowledgeBases[index].conversationIds.unshift(chatId);
+  store.knowledgeBases[index].conversationIds = [...new Set(store.knowledgeBases[index].conversationIds)];
+  store.knowledgeBases[index].updatedAt = new Date().toISOString();
+  store.activeKnowledgeBaseId = targetId;
+  return persistKnowledgeStore(store);
+}
+
+function unlinkConversationFromKnowledgeBase(knowledgeBaseId, conversationId) {
+  const store = readKnowledgeStore();
+  const targetId = String(knowledgeBaseId || "");
+  const chatId = String(conversationId || "");
+  const base = store.knowledgeBases.find((item) => item.id === targetId);
+  if (!base || !chatId) return persistKnowledgeStore(store);
+  base.conversationIds = base.conversationIds.filter((id) => id !== chatId);
+  base.updatedAt = new Date().toISOString();
+  return persistKnowledgeStore(store);
+}
+
+function removeConversationFromKnowledgeBases(conversationId) {
+  const store = readKnowledgeStore();
+  const chatId = String(conversationId || "");
+  let changed = false;
+  for (const base of store.knowledgeBases) {
+    const nextIds = base.conversationIds.filter((id) => id !== chatId);
+    if (nextIds.length !== base.conversationIds.length) {
+      base.conversationIds = nextIds;
+      base.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) persistKnowledgeStore(store);
+}
+
+function addKnowledgeFile(knowledgeBaseId, file) {
+  const store = readKnowledgeStore();
+  const targetId = String(knowledgeBaseId || "");
+  const index = store.knowledgeBases.findIndex((base) => base.id === targetId);
+  if (index < 0) return persistKnowledgeStore(store);
+
+  const fileId = makeId("file");
+  const originalName = safeFileName(file && file.name);
+  const storedName = `${fileId}-${originalName}`;
+  const dir = path.join(knowledgeFilesRoot(), targetId);
+  fs.mkdirSync(dir, { recursive: true });
+  const storedPath = path.join(dir, storedName);
+  const bytes = file && file.bytes ? Buffer.from(file.bytes) : Buffer.alloc(0);
+  fs.writeFileSync(storedPath, bytes);
+
+  const item = normalizeKnowledgeFile({
+    id: fileId,
+    name: originalName,
+    type: file && file.type,
+    size: file && file.size,
+    storedPath,
+    textPreview: file && file.textPreview
+  });
+  store.knowledgeBases[index].files.unshift(item);
+  store.knowledgeBases[index].updatedAt = new Date().toISOString();
+  store.activeKnowledgeBaseId = targetId;
+  return persistKnowledgeStore(store);
+}
+
+function removeKnowledgeFile(knowledgeBaseId, fileId) {
+  const store = readKnowledgeStore();
+  const targetId = String(knowledgeBaseId || "");
+  const targetFileId = String(fileId || "");
+  const base = store.knowledgeBases.find((item) => item.id === targetId);
+  if (!base) return persistKnowledgeStore(store);
+  const file = base.files.find((item) => item.id === targetFileId);
+  base.files = base.files.filter((item) => item.id !== targetFileId);
+  base.updatedAt = new Date().toISOString();
+  if (file && file.storedPath && fs.existsSync(file.storedPath)) {
+    const root = path.resolve(knowledgeFilesRoot());
+    const target = path.resolve(file.storedPath);
+    if (target.startsWith(root + path.sep)) fs.rmSync(target, { force: true });
+  }
+  return persistKnowledgeStore(store);
+}
+
+async function openKnowledgeFile(knowledgeBaseId, fileId) {
+  const store = readKnowledgeStore();
+  const base = store.knowledgeBases.find((item) => item.id === String(knowledgeBaseId || ""));
+  const file = base && base.files.find((item) => item.id === String(fileId || ""));
+  if (!file || !file.storedPath) return { ok: false, error: "File not found." };
+  const error = await shell.openPath(file.storedPath);
+  return error ? { ok: false, error } : { ok: true };
 }
 
 function getFocusedChatWindow() {
@@ -494,6 +722,22 @@ ipcMain.handle("conversations:get", async () => readConversationStore());
 ipcMain.handle("conversations:create", async (_event, title) => createConversation(title));
 ipcMain.handle("conversations:save", async (_event, conversation) => saveConversation(conversation || {}));
 ipcMain.handle("conversations:delete", async (_event, id) => deleteConversation(String(id || "")));
+ipcMain.handle("knowledge:get", async () => readKnowledgeStore());
+ipcMain.handle("knowledge:create", async (_event, name) => createKnowledgeBase(String(name || "新知识库")));
+ipcMain.handle("knowledge:save", async (_event, base) => saveKnowledgeBase(base || {}));
+ipcMain.handle("knowledge:delete", async (_event, id) => deleteKnowledgeBase(String(id || "")));
+ipcMain.handle("knowledge:set-active", async (_event, id) => setActiveKnowledgeBase(id ? String(id) : null));
+ipcMain.handle("knowledge:link-conversation", async (_event, args) =>
+  linkConversationToKnowledgeBase(args && args.knowledgeBaseId, args && args.conversationId)
+);
+ipcMain.handle("knowledge:unlink-conversation", async (_event, args) =>
+  unlinkConversationFromKnowledgeBase(args && args.knowledgeBaseId, args && args.conversationId)
+);
+ipcMain.handle("knowledge:add-file", async (_event, args) => addKnowledgeFile(args && args.knowledgeBaseId, args && args.file));
+ipcMain.handle("knowledge:remove-file", async (_event, args) =>
+  removeKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId)
+);
+ipcMain.handle("knowledge:open-file", async (_event, args) => openKnowledgeFile(args && args.knowledgeBaseId, args && args.fileId));
 ipcMain.handle("tool:run-command", async (_event, args) => {
   const command = String(args && args.command ? args.command : "");
   if (!command.trim()) return { ok: false, stderr: "No command supplied.", stdout: "" };

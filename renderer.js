@@ -5,31 +5,43 @@ const els = {
   sendButton: document.getElementById("sendButton"),
   attachButton: document.getElementById("attachButton"),
   fileInput: document.getElementById("fileInput"),
+  knowledgeFileInput: document.getElementById("knowledgeFileInput"),
   attachments: document.getElementById("attachments"),
   toolbarShotButton: document.getElementById("toolbarShotButton"),
   toolbarClearButton: document.getElementById("toolbarClearButton"),
   toolbarDeleteConversation: document.getElementById("toolbarDeleteConversation"),
   toolbarSettings: document.getElementById("toolbarSettings"),
+  toolbarUploadKnowledge: document.getElementById("toolbarUploadKnowledge"),
+  toolbarLinkKnowledge: document.getElementById("toolbarLinkKnowledge"),
   toolbarNewWindow: document.getElementById("toolbarNewWindow"),
   compactButton: document.getElementById("compactButton"),
   pinButton: document.getElementById("pinButton"),
   toolbarState: document.getElementById("toolbarState"),
   conversationTitle: document.getElementById("conversationTitle"),
+  knowledgeSummary: document.getElementById("knowledgeSummary"),
   providerSummary: document.getElementById("providerSummary"),
   keyState: document.getElementById("keyState"),
+  knowledgeList: document.getElementById("knowledgeList"),
   conversationList: document.getElementById("conversationList"),
-  newConversation: document.getElementById("newConversation")
+  newConversation: document.getElementById("newConversation"),
+  newKnowledgeBase: document.getElementById("newKnowledgeBase"),
+  clearKnowledgeSelection: document.getElementById("clearKnowledgeSelection")
 };
 
 const STORAGE_KEY = "deskchat.settings.v1";
 const MAX_TOOL_STEPS = 6;
+const KNOWLEDGE_FILE_LIMIT_BYTES = 1024 * 1024 * 1024;
 
 let pendingImages = [];
 let chatMessages = [];
 let busy = false;
 let isApplyingConversationUpdate = false;
 let conversations = [];
+let knowledgeBases = [];
 let currentConversationId = null;
+let activeKnowledgeBaseId = null;
+let editingItem = null;
+let knowledgePickerOpen = false;
 let windowState = { compact: false, pinned: false };
 let currentSettings = {
   provider: "openai",
@@ -107,6 +119,167 @@ function activeConversation() {
   return conversations.find((conversation) => conversation.id === currentConversationId) || conversations[0] || null;
 }
 
+function activeKnowledgeBase() {
+  return knowledgeBases.find((base) => base.id === activeKnowledgeBaseId) || null;
+}
+
+function knowledgeBaseForConversation(conversationId) {
+  return knowledgeBases.find((base) => Array.isArray(base.conversationIds) && base.conversationIds.includes(conversationId)) || null;
+}
+
+function conversationById(id) {
+  return conversations.find((conversation) => conversation.id === id) || null;
+}
+
+function formatFileSize(size) {
+  const bytes = Number(size) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function isTextLikeFile(file) {
+  if (!file) return false;
+  if (String(file.type || "").startsWith("text/")) return true;
+  return /\.(md|txt|json|csv|tsv|log|xml|html|css|js|ts|tsx|jsx|py|java|c|cpp|cs|go|rs|php|rb|yml|yaml)$/i.test(file.name || "");
+}
+
+function startEditing(type, id) {
+  editingItem = { type, id };
+  renderConversationList();
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector(`[data-editor-for="${type}:${id}"]`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+function stopEditing() {
+  editingItem = null;
+  renderConversationList();
+}
+
+function isEditing(type, id) {
+  return Boolean(editingItem && editingItem.type === type && editingItem.id === id);
+}
+
+function editableNameInput(type, id, value, onSave) {
+  const input = document.createElement("input");
+  input.className = "inline-name-input";
+  input.type = "text";
+  input.value = value || "";
+  input.dataset.editorFor = `${type}:${id}`;
+
+  async function commit() {
+    const next = input.value.trim();
+    if (next && next !== value) await onSave(next);
+    editingItem = null;
+    renderConversationList();
+  }
+
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", async (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      await commit();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      stopEditing();
+    }
+  });
+  input.addEventListener("blur", commit);
+  return input;
+}
+
+async function renameKnowledgeBase(id, name) {
+  await window.deskchat.saveKnowledgeBase({ id, name, active: activeKnowledgeBaseId === id });
+}
+
+async function renameConversation(id, title) {
+  const conversation = conversationById(id);
+  if (!conversation) return;
+  await window.deskchat.saveConversation({
+    ...conversation,
+    id,
+    title,
+    messages: Array.isArray(conversation.messages) ? conversation.messages : []
+  });
+}
+
+async function ensureConversationForActiveKnowledgeBase() {
+  const base = activeKnowledgeBase();
+  if (!base) return;
+  if (currentConversationId && base.conversationIds.includes(currentConversationId)) return;
+
+  const conversation = await window.deskchat.createConversation("新对话");
+  await window.deskchat.linkConversationToKnowledgeBase(base.id, conversation.id);
+  activeKnowledgeBaseId = base.id;
+  const conversationStore = await window.deskchat.getConversations();
+  applyConversationStore(conversationStore, conversation.id);
+  await loadKnowledgeBases(base.id);
+}
+
+function closeKnowledgePicker() {
+  knowledgePickerOpen = false;
+  const existing = document.querySelector(".knowledge-picker");
+  if (existing) existing.remove();
+}
+
+async function linkCurrentConversationToKnowledgeBase(knowledgeBaseId) {
+  if (!currentConversationId) return;
+  await window.deskchat.linkConversationToKnowledgeBase(knowledgeBaseId, currentConversationId);
+  const store = await window.deskchat.getConversations();
+  applyConversationStore(store, currentConversationId);
+  await loadKnowledgeBases(knowledgeBaseId);
+}
+
+function openKnowledgePicker(anchor) {
+  closeKnowledgePicker();
+
+  if (!currentConversationId) {
+    addMessage("assistant", "请先选择一个要加入知识库的对话。");
+    return;
+  }
+
+  if (!knowledgeBases.length) {
+    addMessage("assistant", "还没有知识库，请先新建一个知识库。");
+    return;
+  }
+
+  knowledgePickerOpen = true;
+  const picker = document.createElement("div");
+  picker.className = "knowledge-picker";
+
+  const title = document.createElement("div");
+  title.className = "knowledge-picker-title";
+  title.textContent = "加入到知识库";
+  picker.appendChild(title);
+
+  for (const base of knowledgeBases) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "knowledge-picker-option";
+    option.classList.toggle("active", base.conversationIds.includes(currentConversationId));
+    option.innerHTML = `<span>${escapeHtml(base.name)}</span><small>${base.conversationIds.length} 个对话 / ${base.files.length} 个文件</small>`;
+    option.addEventListener("click", async () => {
+      await linkCurrentConversationToKnowledgeBase(base.id);
+      closeKnowledgePicker();
+    });
+    picker.appendChild(option);
+  }
+
+  document.body.appendChild(picker);
+  const rect = anchor.getBoundingClientRect();
+  const pickerRect = picker.getBoundingClientRect();
+  const top = Math.min(window.innerHeight - pickerRect.height - 12, rect.bottom + 8);
+  const left = Math.min(window.innerWidth - pickerRect.width - 12, Math.max(12, rect.left));
+  picker.style.top = `${Math.max(12, top)}px`;
+  picker.style.left = `${left}px`;
+}
+
 function titleFromMessages(messages) {
   const firstUser = messages.find((message) => message.role === "user");
   if (!firstUser) return "新对话";
@@ -176,29 +349,245 @@ async function loadSettings() {
   updateSettingsSummary();
 }
 
+function conversationButton(conversation, extraClass = "", onSelect) {
+  if (isEditing("conversation", conversation.id)) {
+    return editableNameInput("conversation", conversation.id, conversation.title || "新对话", (title) =>
+      renameConversation(conversation.id, title)
+    );
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `conversation-item ${extraClass}`.trim();
+  button.classList.toggle("active", conversation.id === currentConversationId);
+  button.dataset.conversationId = conversation.id;
+  button.textContent = conversation.title || "新对话";
+  if (onSelect) button.addEventListener("click", onSelect);
+  button.addEventListener("dblclick", (event) => {
+    event.stopPropagation();
+    startEditing("conversation", conversation.id);
+  });
+  return button;
+}
+
+function conversationRow(conversation, options = {}) {
+  const row = document.createElement("div");
+  row.className = options.nested ? "knowledge-row" : "conversation-row";
+
+  const title = conversationButton(conversation, options.nested ? "nested" : "", options.onSelect);
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "row-action";
+  rename.textContent = "改名";
+  rename.title = "重命名对话";
+  rename.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startEditing("conversation", conversation.id);
+  });
+
+  row.append(title, rename);
+  if (options.extraAction) row.appendChild(options.extraAction);
+  return row;
+}
+
 function renderConversationList() {
   const current = activeConversation();
+  const currentKnowledge = activeKnowledgeBase();
+  const assignedConversationIds = new Set(
+    knowledgeBases.flatMap((base) => (Array.isArray(base.conversationIds) ? base.conversationIds : []))
+  );
+
+  els.knowledgeList.innerHTML = "";
   els.conversationList.innerHTML = "";
-  for (const conversation of conversations) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "conversation-item";
-    button.classList.toggle("active", conversation.id === currentConversationId);
-    button.dataset.conversationId = conversation.id;
-    button.textContent = conversation.title || "新对话";
-    button.addEventListener("click", async () => {
-      if (conversation.id === currentConversationId) return;
-      currentConversationId = conversation.id;
-      const store = await window.deskchat.getConversations();
-      applyConversationStore(store, currentConversationId);
+
+  for (const base of knowledgeBases) {
+    const section = document.createElement("section");
+    section.className = "knowledge-folder";
+    section.classList.toggle("active", base.id === activeKnowledgeBaseId);
+
+    const header = document.createElement("div");
+    header.className = "knowledge-header";
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "folder-toggle";
+    toggle.textContent = base.expanded ? "⌄" : "›";
+    toggle.title = base.expanded ? "收起" : "展开";
+    toggle.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await window.deskchat.saveKnowledgeBase({ id: base.id, expanded: !base.expanded, active: true });
     });
-    els.conversationList.appendChild(button);
+
+    const folderTitleWrap = document.createElement("div");
+    folderTitleWrap.className = "folder-title-wrap";
+    if (isEditing("knowledge", base.id)) {
+      folderTitleWrap.appendChild(editableNameInput("knowledge", base.id, base.name, (name) => renameKnowledgeBase(base.id, name)));
+    } else {
+      const folderButton = document.createElement("button");
+      folderButton.type = "button";
+      folderButton.className = "folder-title";
+      folderButton.title = base.name;
+      folderButton.innerHTML = `<span class="folder-icon">▣</span><span>${escapeHtml(base.name)}</span>`;
+      folderButton.addEventListener("click", async () => {
+        activeKnowledgeBaseId = base.id;
+        currentConversationId = null;
+        chatMessages = [];
+        await window.deskchat.setActiveKnowledgeBase(base.id);
+        renderConversationList();
+        renderMessages();
+      });
+      folderButton.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        startEditing("knowledge", base.id);
+      });
+      folderTitleWrap.appendChild(folderButton);
+    }
+
+    const count = document.createElement("span");
+    count.className = "folder-count";
+    count.textContent = `${base.conversationIds.length}/${base.files.length}`;
+
+    const upload = document.createElement("button");
+    upload.type = "button";
+    upload.className = "folder-action";
+    upload.textContent = "+文件";
+    upload.title = "上传文件到知识库";
+    upload.addEventListener("click", (event) => {
+      event.stopPropagation();
+      activeKnowledgeBaseId = base.id;
+      els.knowledgeFileInput.click();
+      renderConversationList();
+    });
+
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "folder-action";
+    rename.textContent = "改名";
+    rename.title = "重命名知识库";
+    rename.addEventListener("click", (event) => {
+      event.stopPropagation();
+      startEditing("knowledge", base.id);
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "folder-action danger-text";
+    remove.textContent = "删";
+    remove.title = "删除知识库";
+    remove.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (!window.confirm(`删除知识库「${base.name}」？其中的对话不会删除，上传文件会从本地知识库目录移除。`)) return;
+      await window.deskchat.deleteKnowledgeBase(base.id);
+    });
+
+    header.append(toggle, folderTitleWrap, count, upload, rename, remove);
+    section.appendChild(header);
+
+    if (base.expanded) {
+      const children = document.createElement("div");
+      children.className = "knowledge-children";
+
+      const baseConversations = base.conversationIds.map(conversationById).filter(Boolean);
+      for (const conversation of baseConversations) {
+        const unlink = document.createElement("button");
+        unlink.type = "button";
+        unlink.className = "row-action";
+        unlink.textContent = "移出";
+        unlink.title = "从知识库移出此对话";
+        unlink.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await window.deskchat.unlinkConversationFromKnowledgeBase(base.id, conversation.id);
+        });
+
+        const row = conversationRow(conversation, {
+          nested: true,
+          extraAction: unlink,
+          onSelect: async () => {
+            activeKnowledgeBaseId = base.id;
+            currentConversationId = conversation.id;
+            await window.deskchat.setActiveKnowledgeBase(base.id);
+            const store = await window.deskchat.getConversations();
+            applyConversationStore(store, currentConversationId);
+          }
+        });
+        children.appendChild(row);
+      }
+
+      for (const file of base.files) {
+        const row = document.createElement("div");
+        row.className = "knowledge-file";
+
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "file-title";
+        open.title = file.name;
+        open.innerHTML = `<span class="file-icon">□</span><span>${escapeHtml(file.name)}</span><small>${formatFileSize(file.size)}</small>`;
+        open.addEventListener("click", () => window.deskchat.openKnowledgeFile(base.id, file.id));
+
+        const removeFile = document.createElement("button");
+        removeFile.type = "button";
+        removeFile.className = "row-action";
+        removeFile.textContent = "删除";
+        removeFile.title = "从知识库删除文件";
+        removeFile.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await window.deskchat.removeKnowledgeFile(base.id, file.id);
+        });
+
+        row.append(open, removeFile);
+        children.appendChild(row);
+      }
+
+      if (!baseConversations.length && !base.files.length) {
+        const empty = document.createElement("div");
+        empty.className = "folder-empty";
+        empty.textContent = "暂无对话或文件";
+        children.appendChild(empty);
+      }
+
+      section.appendChild(children);
+    }
+
+    els.knowledgeList.appendChild(section);
   }
+
+  if (!knowledgeBases.length) {
+    const empty = document.createElement("div");
+    empty.className = "folder-empty root-empty";
+    empty.textContent = "还没有知识库";
+    els.knowledgeList.appendChild(empty);
+  }
+
+  for (const conversation of conversations.filter((item) => !assignedConversationIds.has(item.id))) {
+    const row = conversationRow(conversation, {
+      onSelect: async () => {
+        if (conversation.id === currentConversationId) return;
+        currentConversationId = conversation.id;
+        activeKnowledgeBaseId = null;
+        await window.deskchat.setActiveKnowledgeBase(null);
+        const store = await window.deskchat.getConversations();
+        applyConversationStore(store, currentConversationId);
+      }
+    });
+    els.conversationList.appendChild(row);
+  }
+
+  if (!els.conversationList.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "folder-empty root-empty";
+    empty.textContent = "没有未归档对话";
+    els.conversationList.appendChild(empty);
+  }
+
   if (current) {
     els.conversationTitle.textContent = current.title || "Deskchat";
   } else {
     els.conversationTitle.textContent = "Deskchat";
   }
+  els.knowledgeSummary.textContent = currentKnowledge ? `知识库：${currentKnowledge.name}` : "未选择知识库";
+  els.toolbarUploadKnowledge.disabled = !currentKnowledge;
+  els.toolbarLinkKnowledge.disabled = !currentConversationId || !knowledgeBases.length;
+  els.toolbarLinkKnowledge.textContent = "加入知识库";
   els.toolbarDeleteConversation.disabled = conversations.length <= 1;
 }
 
@@ -411,6 +800,21 @@ async function loadConversations() {
   applyConversationStore(store);
 }
 
+function applyKnowledgeStore(store, preferredId) {
+  knowledgeBases = Array.isArray(store.knowledgeBases) ? store.knowledgeBases : [];
+  activeKnowledgeBaseId =
+    preferredId ||
+    (activeKnowledgeBaseId && knowledgeBases.some((base) => base.id === activeKnowledgeBaseId) ? activeKnowledgeBaseId : null) ||
+    store.activeKnowledgeBaseId ||
+    null;
+  renderConversationList();
+}
+
+async function loadKnowledgeBases(preferredId) {
+  const store = await window.deskchat.getKnowledgeBases();
+  applyKnowledgeStore(store, preferredId);
+}
+
 function renderAttachments() {
   els.attachments.innerHTML = "";
   for (const [index, dataUrl] of pendingImages.entries()) {
@@ -440,6 +844,39 @@ async function filesToImages(files) {
   renderAttachments();
 }
 
+async function addFilesToKnowledgeBase(files, knowledgeBaseId = activeKnowledgeBaseId) {
+  const targetId = knowledgeBaseId || activeKnowledgeBaseId;
+  const target = knowledgeBases.find((base) => base.id === targetId);
+  if (!target) {
+    addMessage("assistant", "请先选择或创建一个知识库，再上传文件。");
+    return;
+  }
+
+  for (const file of files) {
+    if (file.size > KNOWLEDGE_FILE_LIMIT_BYTES) {
+      addMessage("assistant", `文件「${file.name}」超过 1 GB，暂未导入知识库。`);
+      continue;
+    }
+
+    const buffer = await file.arrayBuffer();
+    let textPreview = "";
+    if (isTextLikeFile(file)) {
+      textPreview = await file.text().catch(() => "");
+      textPreview = textPreview.slice(0, 16000);
+    }
+
+    await window.deskchat.addKnowledgeFile(target.id, {
+      name: file.name,
+      type: file.type || "application/octet-stream",
+      size: file.size,
+      textPreview,
+      bytes: new Uint8Array(buffer)
+    });
+  }
+
+  await loadKnowledgeBases(target.id);
+}
+
 function imagePart(dataUrl) {
   return { type: "image_url", image_url: { url: dataUrl } };
 }
@@ -451,6 +888,41 @@ function userContent(text, images) {
 
 function getSettings() {
   return currentSettings;
+}
+
+function buildKnowledgeContextPrompt() {
+  const base = activeKnowledgeBase();
+  if (!base) return "";
+
+  const lines = [
+    "",
+    "",
+    `当前知识库：${base.name}`,
+    "知识库中的文件和文本预览如下。回答时优先参考这些材料；如果材料不足，请明确说明。"
+  ];
+
+  if (!base.files.length) {
+    lines.push("当前知识库还没有上传文件。");
+  } else {
+    for (const file of base.files.slice(0, 20)) {
+      lines.push(`\n文件：${file.name}（${formatFileSize(file.size)}）`);
+      if (file.textPreview) {
+        lines.push(file.textPreview.slice(0, 6000));
+      } else {
+        lines.push("此文件没有可注入的文本预览，只能作为已上传文件记录。");
+      }
+    }
+  }
+
+  const relatedConversations = base.conversationIds.map(conversationById).filter(Boolean);
+  if (relatedConversations.length) {
+    lines.push("\n知识库内相关对话：");
+    for (const conversation of relatedConversations.slice(0, 12)) {
+      lines.push(`- ${conversation.title || "新对话"}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function normalizeChatCompletionsUrl(url) {
@@ -569,6 +1041,8 @@ async function sendMessage(text, images = []) {
   els.sendButton.disabled = true;
 
   try {
+    await ensureConversationForActiveKnowledgeBase();
+
     if (images.length && !getSettings().supportsVision) {
       addMessage(
         "assistant",
@@ -587,7 +1061,8 @@ async function sendMessage(text, images = []) {
       : "\n\n当前 API 配置不支持图片输入。不要尝试截图分析或要求发送 image_url；如果用户要求看屏幕，请告诉用户需要切换到支持视觉的模型或中转站。";
     const formatPrompt =
       "\n\n回答数学、代码或长解释时，请使用清晰的 Markdown：用小标题、短段落、项目列表和必要的公式分块。不要把整段推理挤成一整块。";
-    let apiMessages = [{ role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}` }, ...chatMessages];
+    const knowledgePrompt = buildKnowledgeContextPrompt();
+    let apiMessages = [{ role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` }, ...chatMessages];
     let finalText = "";
 
     for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
@@ -648,13 +1123,50 @@ els.pinButton.addEventListener("click", async () => {
 });
 els.newConversation.addEventListener("click", async () => {
   const conversation = await window.deskchat.createConversation("新对话");
+  if (activeKnowledgeBaseId) {
+    await window.deskchat.linkConversationToKnowledgeBase(activeKnowledgeBaseId, conversation.id);
+  }
   const store = await window.deskchat.getConversations();
   applyConversationStore(store, conversation.id);
+  await loadKnowledgeBases(activeKnowledgeBaseId);
+});
+els.newKnowledgeBase.addEventListener("click", async () => {
+  const base = await window.deskchat.createKnowledgeBase("新知识库");
+  activeKnowledgeBaseId = base.id;
+  editingItem = { type: "knowledge", id: base.id };
+  await loadKnowledgeBases(base.id);
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector(`[data-editor-for="knowledge:${base.id}"]`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  });
+});
+els.clearKnowledgeSelection.addEventListener("click", async () => {
+  activeKnowledgeBaseId = null;
+  await window.deskchat.setActiveKnowledgeBase(null);
+  renderConversationList();
+});
+els.toolbarUploadKnowledge.addEventListener("click", () => {
+  if (!activeKnowledgeBase()) {
+    addMessage("assistant", "请先在左侧选择或创建一个知识库。");
+    return;
+  }
+  els.knowledgeFileInput.click();
+});
+els.toolbarLinkKnowledge.addEventListener("click", async () => {
+  if (knowledgePickerOpen) {
+    closeKnowledgePicker();
+    return;
+  }
+  openKnowledgePicker(els.toolbarLinkKnowledge);
 });
 els.toolbarDeleteConversation.addEventListener("click", async () => {
   if (!currentConversationId || conversations.length <= 1) return;
   const store = await window.deskchat.deleteConversation(currentConversationId);
   applyConversationStore(store);
+  await loadKnowledgeBases(activeKnowledgeBaseId);
 });
 window.deskchat.onWindowState(applyWindowState);
 window.deskchat.onSettingsUpdated((settings) => {
@@ -664,10 +1176,17 @@ window.deskchat.onSettingsUpdated((settings) => {
 window.deskchat.onConversationsUpdated((store) => {
   applyConversationStore(store, currentConversationId);
 });
+window.deskchat.onKnowledgeBasesUpdated((store) => {
+  applyKnowledgeStore(store, activeKnowledgeBaseId);
+});
 els.attachButton.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", async (event) => {
   await filesToImages(Array.from(event.target.files || []));
   els.fileInput.value = "";
+});
+els.knowledgeFileInput.addEventListener("change", async (event) => {
+  await addFilesToKnowledgeBase(Array.from(event.target.files || []));
+  els.knowledgeFileInput.value = "";
 });
 
 els.toolbarShotButton.addEventListener("click", captureToAttachments);
@@ -699,11 +1218,26 @@ els.prompt.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("click", (event) => {
+  if (!knowledgePickerOpen) return;
+  const picker = document.querySelector(".knowledge-picker");
+  if (picker && !picker.contains(event.target) && event.target !== els.toolbarLinkKnowledge) {
+    closeKnowledgePicker();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && knowledgePickerOpen) closeKnowledgePicker();
+});
+
 loadSettings().catch((error) => {
   addMessage("assistant", `读取设置失败：${error.message}`);
 });
 loadConversations().catch((error) => {
   addMessage("assistant", `读取历史对话失败：${error.message}`);
+});
+loadKnowledgeBases().catch((error) => {
+  addMessage("assistant", `读取知识库失败：${error.message}`);
 });
 window.deskchat.getWindowState().then(applyWindowState).catch(() => {});
 renderEmpty();

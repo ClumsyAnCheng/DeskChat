@@ -12,6 +12,18 @@ contextBridge.exposeInMainWorld("deskchat", {
   createConversation: (title) => ipcRenderer.invoke("conversations:create", title),
   saveConversation: (conversation) => ipcRenderer.invoke("conversations:save", conversation),
   deleteConversation: (id) => ipcRenderer.invoke("conversations:delete", id),
+  getKnowledgeBases: () => ipcRenderer.invoke("knowledge:get"),
+  createKnowledgeBase: (name) => ipcRenderer.invoke("knowledge:create", name),
+  saveKnowledgeBase: (base) => ipcRenderer.invoke("knowledge:save", base),
+  deleteKnowledgeBase: (id) => ipcRenderer.invoke("knowledge:delete", id),
+  setActiveKnowledgeBase: (id) => ipcRenderer.invoke("knowledge:set-active", id),
+  linkConversationToKnowledgeBase: (knowledgeBaseId, conversationId) =>
+    ipcRenderer.invoke("knowledge:link-conversation", { knowledgeBaseId, conversationId }),
+  unlinkConversationFromKnowledgeBase: (knowledgeBaseId, conversationId) =>
+    ipcRenderer.invoke("knowledge:unlink-conversation", { knowledgeBaseId, conversationId }),
+  addKnowledgeFile: (knowledgeBaseId, file) => ipcRenderer.invoke("knowledge:add-file", { knowledgeBaseId, file }),
+  removeKnowledgeFile: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:remove-file", { knowledgeBaseId, fileId }),
+  openKnowledgeFile: (knowledgeBaseId, fileId) => ipcRenderer.invoke("knowledge:open-file", { knowledgeBaseId, fileId }),
   onSettingsUpdated: (callback) => {
     ipcRenderer.removeAllListeners("settings:updated");
     ipcRenderer.on("settings:updated", (_event, settings) => callback(settings));
@@ -19,6 +31,10 @@ contextBridge.exposeInMainWorld("deskchat", {
   onConversationsUpdated: (callback) => {
     ipcRenderer.removeAllListeners("conversations:updated");
     ipcRenderer.on("conversations:updated", (_event, store) => callback(store));
+  },
+  onKnowledgeBasesUpdated: (callback) => {
+    ipcRenderer.removeAllListeners("knowledge:updated");
+    ipcRenderer.on("knowledge:updated", (_event, store) => callback(store));
   },
   onWindowState: (callback) => {
     ipcRenderer.removeAllListeners("window:state");
