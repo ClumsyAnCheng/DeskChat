@@ -21,6 +21,8 @@
       <div class="sidebar-actions">
         <button id="newConversation" class="new-chat-button" type="button">新建对话</button>
         <button id="newKnowledgeBase" class="new-chat-button subtle" type="button">新建知识库</button>
+        <button id="openMemoryCenter" class="new-chat-button subtle" type="button">记忆中心</button>
+        <button id="openTodoList" class="new-chat-button subtle" type="button">打开 Todo</button>
       </div>
 
       <nav class="conversation-nav" aria-label="会话导航">
@@ -29,7 +31,7 @@
           <button id="clearKnowledgeSelection" class="mini-button" type="button" title="显示普通对话">全部</button>
         </div>
         <div class="knowledge-search">
-          <input id="knowledgeSearchInput" type="search" placeholder="搜索当前知识库" />
+          <input id="knowledgeSearchInput" type="search" placeholder="搜索知识库和记忆" />
           <div id="knowledgeSearchResults" class="knowledge-search-results"></div>
         </div>
         <div id="knowledgeList" class="knowledge-list"></div>
@@ -57,7 +59,9 @@
           <div class="menu-group">
             <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">应用</button>
             <div class="menu-popover" role="menu">
-              <button id="toolbarSettings" type="button" role="menuitem">API 配置</button>
+              <button id="toolbarOpenTodo" type="button" role="menuitem">打开 Todo</button>
+              <button id="toolbarMemoryCenter" type="button" role="menuitem">记忆中心</button>
+              <button id="toolbarSettings" type="button" role="menuitem">设置</button>
             </div>
           </div>
           <div class="menu-group">

@@ -5,11 +5,21 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "lint": "npm run typecheck",
+    "build": "npm run typecheck && npm test",
     "build:app": "electron .",
-    "typecheck": "node --check main.js && node --check preload.js && node --check renderer.js && node --check settings.js"
+    "typecheck": "node --check main.js && node --check preload.js && node --check renderer.js && node --check settings.js && node --check quick-add-parser.js && node --check quick-add-parser.selftest.js && node --check goal-decomposer.js && node --check goal-decomposer.selftest.js && node --check goal-task-detector.js && node --check goal-task-detector.selftest.js && node --check todo.js && node --check todo-system.selftest.js && node --check main-todo-store.selftest.js && node --check todo.e2e.js",
+    "test": "npm run test:quick-add && npm run test:goal-decomposer && npm run test:goal-task-detector && npm run test:todo-system && npm run test:main-todo-store",
+    "test:quick-add": "node quick-add-parser.selftest.js",
+    "test:goal-decomposer": "node goal-decomposer.selftest.js",
+    "test:goal-task-detector": "node goal-task-detector.selftest.js",
+    "test:todo-system": "node todo-system.selftest.js",
+    "test:main-todo-store": "node main-todo-store.selftest.js",
+    "test:e2e": "node todo.e2e.js"
   },
   "devDependencies": {
-    "electron": "^31.7.7"
+    "electron": "^31.7.7",
+    "playwright-core": "^1.60.0"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.11.1",

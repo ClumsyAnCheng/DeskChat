@@ -11,6 +11,8 @@ const els = {
   toolbarClearButton: document.getElementById("toolbarClearButton"),
   toolbarDeleteConversation: document.getElementById("toolbarDeleteConversation"),
   toolbarSettings: document.getElementById("toolbarSettings"),
+  toolbarOpenTodo: document.getElementById("toolbarOpenTodo"),
+  toolbarMemoryCenter: document.getElementById("toolbarMemoryCenter"),
   toolbarUploadKnowledge: document.getElementById("toolbarUploadKnowledge"),
   toolbarLinkKnowledge: document.getElementById("toolbarLinkKnowledge"),
   toolbarNewWindow: document.getElementById("toolbarNewWindow"),
@@ -27,12 +29,22 @@ const els = {
   conversationList: document.getElementById("conversationList"),
   newConversation: document.getElementById("newConversation"),
   newKnowledgeBase: document.getElementById("newKnowledgeBase"),
+  openMemoryCenter: document.getElementById("openMemoryCenter"),
+  openTodoList: document.getElementById("openTodoList"),
   clearKnowledgeSelection: document.getElementById("clearKnowledgeSelection")
 };
 
 const STORAGE_KEY = "deskchat.settings.v1";
 const MAX_TOOL_STEPS = 6;
 const KNOWLEDGE_FILE_LIMIT_BYTES = 1024 * 1024 * 1024;
+const defaultMemorySettings = window.DeskchatConfig.DEFAULT_MEMORY_SETTINGS || {
+  enabled: true,
+  rememberAssistant: true,
+  recallEnabled: true,
+  recallLimit: 6,
+  minMessageChars: 8,
+  minChunkChars: 24
+};
 
 let pendingImages = [];
 let chatMessages = [];
@@ -45,10 +57,14 @@ let activeKnowledgeBaseId = null;
 let editingItem = null;
 let knowledgePickerOpen = false;
 let activeMenuGroup = null;
+let contextMenu = null;
 let mindMapPanel = null;
+let memoryPanel = null;
 let activeMindMap = null;
 let knowledgeGraphPanel = null;
 let activeKnowledgeGraphSimulation = null;
+let knowledgeSearchRunId = 0;
+let memoryPanelRunId = 0;
 let windowState = { compact: false, pinned: false };
 let currentSettings = { ...window.DeskchatConfig.DEFAULT_SETTINGS };
 
@@ -68,12 +84,52 @@ function conversationById(id) {
   return conversations.find((conversation) => conversation.id === id) || null;
 }
 
+function memoryExcludeConversationIds() {
+  const activeBase = activeKnowledgeBase();
+  return [
+    currentConversationId,
+    ...((activeBase && Array.isArray(activeBase.conversationIds)) ? activeBase.conversationIds : [])
+  ].filter(Boolean);
+}
+
+function normalizeMemorySettings(config) {
+  const recallLimit = Number(config && config.recallLimit);
+  const minMessageChars = Number(config && config.minMessageChars);
+  const minChunkChars = Number(config && config.minChunkChars);
+  return {
+    enabled: config && config.enabled !== undefined ? Boolean(config.enabled) : defaultMemorySettings.enabled,
+    rememberAssistant: config && config.rememberAssistant !== undefined
+      ? Boolean(config.rememberAssistant)
+      : defaultMemorySettings.rememberAssistant,
+    recallEnabled: config && config.recallEnabled !== undefined
+      ? Boolean(config.recallEnabled)
+      : defaultMemorySettings.recallEnabled,
+    recallLimit: Math.max(0, Math.min(Number.isFinite(recallLimit) ? recallLimit : defaultMemorySettings.recallLimit, 12)),
+    minMessageChars: Math.max(1, Math.min(Number.isFinite(minMessageChars) ? minMessageChars : defaultMemorySettings.minMessageChars, 200)),
+    minChunkChars: Math.max(1, Math.min(Number.isFinite(minChunkChars) ? minChunkChars : defaultMemorySettings.minChunkChars, 600))
+  };
+}
+
 function debounce(fn, delay = 250) {
   let timer = null;
   return (...args) => {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => fn(...args), delay);
   };
+}
+
+async function confirmAction(message, options = {}) {
+  if (window.deskchat && typeof window.deskchat.confirmAction === "function") {
+    return window.deskchat.confirmAction({
+      title: options.title || "确认操作",
+      message,
+      detail: options.detail || "",
+      confirmLabel: options.confirmLabel || "确认",
+      cancelLabel: options.cancelLabel || "取消",
+      danger: options.danger !== false
+    });
+  }
+  return window.confirm(message);
 }
 
 function formatFileSize(size) {
@@ -174,6 +230,11 @@ function closeMindMapPanel() {
   mindMapPanel = null;
 }
 
+function closeMemoryPanel() {
+  if (memoryPanel) memoryPanel.remove();
+  memoryPanel = null;
+}
+
 function closeKnowledgeGraphPanel() {
   if (activeKnowledgeGraphSimulation && typeof activeKnowledgeGraphSimulation.stop === "function") {
     activeKnowledgeGraphSimulation.stop();
@@ -182,6 +243,90 @@ function closeKnowledgeGraphPanel() {
   if (knowledgeGraphPanel) knowledgeGraphPanel.remove();
   knowledgeGraphPanel = null;
 }
+
+function closeContextMenu() {
+  if (contextMenu) contextMenu.remove();
+  contextMenu = null;
+}
+
+function contextMenuCommand(command) {
+  if (typeof document.execCommand === "function") document.execCommand(command);
+}
+
+function textFieldContextItems(field) {
+  const value = typeof field.value === "string" ? field.value : "";
+  const hasSelection = typeof field.selectionStart === "number"
+    && typeof field.selectionEnd === "number"
+    && field.selectionStart !== field.selectionEnd;
+  const editable = !field.disabled && !field.readOnly;
+  return [
+    { label: "剪切", disabled: !editable || !hasSelection, action: () => contextMenuCommand("cut") },
+    { label: "复制", disabled: !hasSelection, action: () => contextMenuCommand("copy") },
+    { label: "粘贴", disabled: !editable, action: () => contextMenuCommand("paste") },
+    { type: "separator" },
+    {
+      label: "全选",
+      disabled: !value.length,
+      action: () => {
+        field.focus();
+        if (typeof field.select === "function") field.select();
+      }
+    }
+  ];
+}
+
+function openContextMenu(event, items) {
+  event.preventDefault();
+  event.stopPropagation();
+  closeContextMenu();
+  closeAppMenus();
+  closeKnowledgePicker();
+
+  const textField = event.target && event.target.closest && event.target.closest("input, textarea");
+  const available = (textField ? textFieldContextItems(textField) : items).filter(Boolean);
+  if (!available.length) return;
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of available) {
+    if (item.type === "separator") {
+      const separator = document.createElement("div");
+      separator.className = "context-menu-separator";
+      menu.appendChild(separator);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.role = "menuitem";
+    button.textContent = item.label;
+    if (item.danger) button.classList.add("danger-text");
+    if (item.disabled) button.disabled = true;
+    button.addEventListener("click", async () => {
+      closeContextMenu();
+      if (!item.disabled && item.action) await item.action();
+    });
+    menu.appendChild(button);
+  }
+
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - rect.width - 8, Math.max(8, event.clientX));
+  const top = Math.min(window.innerHeight - rect.height - 8, Math.max(8, event.clientY));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  contextMenu = menu;
+}
+
+function bindContextMenu(target, itemsFactory) {
+  target.addEventListener("contextmenu", (event) => openContextMenu(event, itemsFactory()));
+}
+
+document.addEventListener("contextmenu", (event) => {
+  if (event.target && event.target.closest && event.target.closest("input, textarea")) {
+    openContextMenu(event, []);
+  }
+});
 
 function downloadText(filename, text, mime = "text/plain") {
   const blob = new Blob([text], { type: mime });
@@ -193,11 +338,264 @@ function downloadText(filename, text, mime = "text/plain") {
   URL.revokeObjectURL(url);
 }
 
+function formatMemoryTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function memoryPanelQuery() {
+  if (!memoryPanel) return "";
+  const input = memoryPanel.querySelector('[data-role="memory-query"]');
+  return input ? input.value.trim() : "";
+}
+
+function setMemoryPanelStatus(message, kind = "") {
+  if (!memoryPanel) return;
+  const status = memoryPanel.querySelector('[data-role="memory-status"]');
+  if (!status) return;
+  status.textContent = message || "";
+  status.className = `memory-status ${kind}`.trim();
+}
+
+function memorySettingsSummary(settings) {
+  const memory = normalizeMemorySettings(settings);
+  if (!memory.enabled) return "长期记忆索引已关闭";
+  if (!memory.recallEnabled) return "长期记忆仅索引，聊天时不自动召回";
+  return `自动召回最多 ${memory.recallLimit} 条，${memory.rememberAssistant ? "包含助手回复" : "仅记住用户消息"}`;
+}
+
+function updateMemoryPanelSettings(store) {
+  if (!memoryPanel) return;
+  const settingsNode = memoryPanel.querySelector('[data-role="memory-settings"]');
+  if (!settingsNode) return;
+  const memory = normalizeMemorySettings((store && store.settings) || currentSettings.memory);
+  settingsNode.textContent = memorySettingsSummary(memory);
+}
+
+function memoryPreviewText(item) {
+  return String(item && item.text ? item.text : "").replace(/\s+/g, " ").trim();
+}
+
+function renderMemoryResults(results, store) {
+  if (!memoryPanel) return;
+  const list = memoryPanel.querySelector('[data-role="memory-list"]');
+  const count = memoryPanel.querySelector('[data-role="memory-count"]');
+  const hiddenCount = memoryPanel.querySelector('[data-role="memory-hidden-count"]');
+  const forgottenCount = memoryPanel.querySelector('[data-role="memory-forgotten-count"]');
+  if (!list) return;
+
+  const items = Array.isArray(results) ? results : [];
+  updateMemoryPanelSettings(store);
+  list.innerHTML = "";
+  if (count) count.textContent = `${items.length} 条`;
+  if (hiddenCount) hiddenCount.textContent = `${(store && store.hiddenItemIds && store.hiddenItemIds.length) || 0} 条已隐藏`;
+  if (forgottenCount) forgottenCount.textContent = `${(store && store.forgottenConversationIds && store.forgottenConversationIds.length) || 0} 个对话已遗忘`;
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "memory-empty";
+    empty.textContent = memoryPanelQuery() ? "没有匹配的记忆" : "还没有可用记忆";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("article");
+    row.className = "memory-item";
+    const title = item.conversationTitle || item.conversationId || "未命名对话";
+    const chunk = Number(item.chunkIndex) + 1;
+    const preview = memoryPreviewText(item);
+    row.innerHTML = `
+      <header>
+        <strong>${escapeHtml(title)} #${Number.isFinite(chunk) ? chunk : 1}</strong>
+        <span>${escapeHtml(formatMemoryTime(item.updatedAt))}</span>
+      </header>
+      <p>${escapeHtml(preview.slice(0, 520))}</p>
+      <footer>
+        <span>${escapeHtml(item.source || "conversation")}</span>
+        ${Number.isFinite(Number(item.score)) ? `<span>score ${escapeHtml(String(item.score))}</span>` : ""}
+      </footer>
+    `;
+
+    bindContextMenu(row, () => [
+      {
+        label: "引用到输入框",
+        action: () => {
+          els.prompt.value = `请基于这条长期记忆回答：[长期记忆:${title}#${Number.isFinite(chunk) ? chunk : 1}]\n\n${String(item.text || "").slice(0, 1200)}`;
+          els.prompt.focus();
+          closeMemoryPanel();
+        }
+      },
+      {
+        label: "复制记忆",
+        action: () => window.deskchat.copyText(item.text || "")
+      },
+      { type: "separator" },
+      {
+        label: "删除这条记忆",
+        danger: true,
+        action: async () => {
+          if (!(await confirmAction("删除这条记忆？后续重建不会恢复这条隐藏记忆。", { confirmLabel: "删除" }))) return;
+          await window.deskchat.deleteMemoryItem(item.id);
+          await refreshMemoryPanel();
+        }
+      },
+      {
+        label: "遗忘这个对话",
+        danger: true,
+        action: async () => {
+          if (!(await confirmAction(`遗忘对话「${title}」的全部长期记忆？`, { confirmLabel: "遗忘" }))) return;
+          await window.deskchat.forgetConversationMemory(item.conversationId);
+          await refreshMemoryPanel();
+        }
+      }
+    ]);
+
+    row.addEventListener("dblclick", () => {
+      els.prompt.value = `请基于这条长期记忆回答：[长期记忆:${title}#${Number.isFinite(chunk) ? chunk : 1}]\n\n${String(item.text || "").slice(0, 1200)}`;
+      els.prompt.focus();
+      closeMemoryPanel();
+    });
+    list.appendChild(row);
+  }
+}
+
+async function refreshMemoryPanel() {
+  if (!memoryPanel) return;
+  const query = memoryPanelQuery();
+  const runId = memoryPanelRunId + 1;
+  memoryPanelRunId = runId;
+  const list = memoryPanel.querySelector('[data-role="memory-list"]');
+  if (list) list.innerHTML = '<div class="memory-empty">正在读取记忆...</div>';
+  try {
+    const store = await window.deskchat.getMemories();
+    let results = Array.isArray(store.items) ? store.items : [];
+    if (query) {
+      const search = await window.deskchat.searchMemories(query, {
+        limit: 20,
+        excludeConversationIds: [],
+        includeDisabled: true
+      });
+      results = Array.isArray(search.results) ? search.results : [];
+    }
+    if (!memoryPanel || runId !== memoryPanelRunId || query !== memoryPanelQuery()) return;
+    renderMemoryResults(results.slice(0, 80), store);
+    setMemoryPanelStatus(query ? `已按“${query}”检索` : "长期记忆已同步", "success");
+  } catch (error) {
+    if (!memoryPanel || runId !== memoryPanelRunId) return;
+    renderMemoryResults([], null);
+    setMemoryPanelStatus(`读取记忆失败：${error.message || "未知错误"}`, "error");
+  }
+}
+
+function openMemoryCenter() {
+  closeAppMenus();
+  closeKnowledgePicker();
+  closeMemoryPanel();
+
+  memoryPanel = document.createElement("section");
+  memoryPanel.className = "memory-panel";
+  memoryPanel.innerHTML = `
+    <header class="memory-header">
+      <div>
+        <strong>记忆中心</strong>
+        <span>管理自动沉淀的长期对话记忆</span>
+      </div>
+      <div class="memory-actions">
+        <button type="button" data-action="settings">配置记忆</button>
+        <button type="button" data-action="rebuild">重建索引</button>
+        <button type="button" data-action="restore">恢复全部</button>
+        <button type="button" class="danger-text" data-action="forget-all">遗忘全部</button>
+        <button type="button" data-action="close">关闭</button>
+      </div>
+    </header>
+    <div class="memory-toolbar">
+      <input data-role="memory-query" type="search" placeholder="搜索长期记忆" />
+      <button type="button" data-action="search">搜索</button>
+      <button type="button" data-action="clear-search">全部</button>
+    </div>
+    <div class="memory-meta">
+      <span data-role="memory-count">0 条</span>
+      <span data-role="memory-hidden-count">0 条已隐藏</span>
+      <span data-role="memory-forgotten-count">0 个对话已遗忘</span>
+      <span data-role="memory-settings">长期记忆状态读取中</span>
+    </div>
+    <div data-role="memory-status" class="memory-status"></div>
+    <div data-role="memory-list" class="memory-list"></div>
+  `;
+  document.body.appendChild(memoryPanel);
+
+  memoryPanel.querySelector('[data-action="close"]').addEventListener("click", closeMemoryPanel);
+  memoryPanel.querySelector('[data-action="settings"]').addEventListener("click", () => window.deskchat.openSettings());
+  memoryPanel.querySelector('[data-action="search"]').addEventListener("click", refreshMemoryPanel);
+  memoryPanel.querySelector('[data-action="clear-search"]').addEventListener("click", () => {
+    const input = memoryPanel.querySelector('[data-role="memory-query"]');
+    if (input) input.value = "";
+    refreshMemoryPanel();
+  });
+  memoryPanel.querySelector('[data-action="rebuild"]').addEventListener("click", async () => {
+    setMemoryPanelStatus("正在重建记忆索引...");
+    try {
+      await window.deskchat.rebuildMemories();
+      await refreshMemoryPanel();
+      setMemoryPanelStatus("记忆索引已重建", "success");
+    } catch (error) {
+      setMemoryPanelStatus(`重建失败：${error.message || "未知错误"}`, "error");
+    }
+  });
+  memoryPanel.querySelector('[data-action="forget-all"]').addEventListener("click", async () => {
+    if (!(await confirmAction("遗忘所有长期记忆？历史对话不会删除，但自动记忆会被清空并保持遗忘状态。", { confirmLabel: "遗忘全部" }))) return;
+    await window.deskchat.forgetAllMemories();
+    await refreshMemoryPanel();
+    setMemoryPanelStatus("已遗忘全部长期记忆", "success");
+  });
+  memoryPanel.querySelector('[data-action="restore"]').addEventListener("click", async () => {
+    if (!(await confirmAction("恢复并重建全部历史对话记忆？之前隐藏的单条记忆也会重新参与索引。", { confirmLabel: "恢复重建", danger: false }))) return;
+    await window.deskchat.restoreAllMemories();
+    await refreshMemoryPanel();
+    setMemoryPanelStatus("全部长期记忆已恢复", "success");
+  });
+  const queryInput = memoryPanel.querySelector('[data-role="memory-query"]');
+  queryInput.addEventListener("input", debounce(refreshMemoryPanel, 250));
+  queryInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      refreshMemoryPanel();
+    }
+  });
+  bindContextMenu(memoryPanel, () => [
+    { label: "搜索记忆", action: refreshMemoryPanel },
+    { label: "重建索引", action: () => memoryPanel.querySelector('[data-action="rebuild"]').click() },
+    { label: "配置记忆", action: () => window.deskchat.openSettings() },
+    { type: "separator" },
+    { label: "恢复全部", action: () => memoryPanel.querySelector('[data-action="restore"]').click() },
+    {
+      label: "遗忘全部",
+      danger: true,
+      action: () => memoryPanel.querySelector('[data-action="forget-all"]').click()
+    }
+  ]);
+  refreshMemoryPanel();
+}
+
 async function openMindMapPanel(knowledgeBaseId, fileId) {
   closeMindMapPanel();
-  const result = await window.deskchat.getKnowledgeMindMap(knowledgeBaseId, fileId);
+  let result;
+  try {
+    result = await window.deskchat.getKnowledgeMindMap(knowledgeBaseId, fileId);
+  } catch (error) {
+    await addAssistantNotice(`思维导图生成失败：${error.message}`);
+    return;
+  }
   if (!result || !result.ok) {
-    addMessage("assistant", result && result.error ? result.error : "思维导图生成失败。");
+    await addAssistantNotice(result && result.error ? result.error : "思维导图生成失败。");
     return;
   }
 
@@ -224,7 +622,7 @@ async function openMindMapPanel(knowledgeBaseId, fileId) {
   const svg = mindMapPanel.querySelector(".mindmap-canvas");
   const Markmap = window.markmap && window.markmap.Markmap;
   if (!Markmap) {
-    addMessage("assistant", "思维导图库加载失败，请重新启动应用后再试。");
+    await addAssistantNotice("思维导图库加载失败，请重新启动应用后再试。");
     closeMindMapPanel();
     return;
   }
@@ -237,7 +635,7 @@ async function openMindMapPanel(knowledgeBaseId, fileId) {
       maxWidth: 360
     }, result.root);
   } catch (error) {
-    addMessage("assistant", `思维导图渲染失败：${error.message}`);
+    await addAssistantNotice(`思维导图渲染失败：${error.message}`);
     closeMindMapPanel();
     return;
   }
@@ -475,7 +873,13 @@ function createKnowledgeGraphPanel(fileName = "Knowledge Graph", knowledgeBaseNa
 
 async function loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId) {
   setKnowledgeGraphLoading(panel, "Preparing knowledge graph", "Uploading if needed, starting parsing, and checking GraphRAG status.");
-  const result = await window.deskchat.getKnowledgeGraph(knowledgeBaseId, fileId);
+  let result;
+  try {
+    result = await window.deskchat.getKnowledgeGraph(knowledgeBaseId, fileId);
+  } catch (error) {
+    setKnowledgeGraphIssue(panel, { ok: false, error: error.message || "Knowledge graph failed." }, knowledgeBaseId, fileId);
+    return;
+  }
   if (!result || !result.ok) {
     if (result && result.pending) {
       setKnowledgeGraphPending(panel, result, knowledgeBaseId, fileId);
@@ -496,7 +900,7 @@ async function loadKnowledgeGraphIntoPanel(panel, knowledgeBaseId, fileId) {
   const exportButton = panel.querySelector('[data-action="download-json"]');
   exportButton.disabled = false;
   if (!window.d3) {
-    addMessage("assistant", "D3 is not loaded. Restart the app and try again.");
+    await addAssistantNotice("D3 is not loaded. Restart the app and try again.");
     closeKnowledgeGraphPanel();
     return;
   }
@@ -535,16 +939,16 @@ async function linkCurrentConversationToKnowledgeBase(knowledgeBaseId) {
   await loadKnowledgeBases(knowledgeBaseId);
 }
 
-function openKnowledgePicker(anchor) {
+async function openKnowledgePicker(anchor) {
   closeKnowledgePicker();
 
   if (!currentConversationId) {
-    addMessage("assistant", "请先选择一个要加入知识库的对话。");
+    await addAssistantNotice("请先选择一个要加入知识库的对话。");
     return;
   }
 
   if (!knowledgeBases.length) {
-    addMessage("assistant", "还没有知识库，请先新建一个知识库。");
+    await addAssistantNotice("还没有知识库，请先新建一个知识库。");
     return;
   }
 
@@ -579,6 +983,12 @@ function openKnowledgePicker(anchor) {
   picker.style.left = `${left}px`;
 }
 
+async function openTodoWindow() {
+  closeAppMenus();
+  closeKnowledgePicker();
+  await window.deskchat.openTodoWindow();
+}
+
 function titleFromMessages(messages) {
   const firstUser = messages.find((message) => message.role === "user");
   if (!firstUser) return "新对话";
@@ -602,12 +1012,64 @@ async function persistCurrentConversation() {
   });
 }
 
+async function addAssistantNotice(text, options = {}) {
+  const content = String(text || "");
+  if (!content) return;
+  const messageIndex = chatMessages.length;
+  const message = {
+    role: "assistant",
+    content,
+    ...(options.remember === true ? {} : { remember: false })
+  };
+  chatMessages.push(message);
+  addMessage("assistant", content, [], messageIndex);
+  if (options.persist === false) return;
+  try {
+    await persistCurrentConversation();
+  } catch (error) {
+    console.warn("Failed to persist assistant notice", error);
+  }
+}
+
+async function clearCurrentConversation() {
+  if (chatMessages.length && !(await confirmAction("清空当前对话的所有消息？", { confirmLabel: "清空" }))) return;
+  chatMessages = [];
+  pendingImages = [];
+  els.messages.innerHTML = "";
+  renderAttachments();
+  renderEmpty();
+  await persistCurrentConversation();
+}
+
+async function deleteCurrentConversation() {
+  if (!currentConversationId || conversations.length <= 1) return;
+  const current = activeConversation();
+  if (!(await confirmAction(`删除对话「${(current && current.title) || "新对话"}」？`, { confirmLabel: "删除" }))) return;
+  const store = await window.deskchat.deleteConversation(currentConversationId);
+  applyConversationStore(store);
+  await loadKnowledgeBases(activeKnowledgeBaseId);
+}
+
+async function createConversationFromMenu() {
+  const conversation = await window.deskchat.createConversation("新对话");
+  if (activeKnowledgeBaseId) {
+    await window.deskchat.linkConversationToKnowledgeBase(activeKnowledgeBaseId, conversation.id);
+  }
+  const store = await window.deskchat.getConversations();
+  applyConversationStore(store, conversation.id);
+  await loadKnowledgeBases(activeKnowledgeBaseId);
+}
+
 function updateSettingsSummary() {
   const providerName = currentSettings.name || currentSettings.providerName || currentSettings.provider || "Custom";
   els.providerSummary.textContent = `${providerName} / ${currentSettings.model || "未选择模型"}`;
   const keyText = currentSettings.apiKey ? "API Key 已保存" : "未配置 API Key";
   const visionText = currentSettings.supportsVision ? "支持图片" : "仅文本";
-  els.keyState.textContent = `${keyText} / ${visionText}`;
+  const memory = normalizeMemorySettings(currentSettings.memory);
+  const memoryText = memory.enabled
+    ? (memory.recallEnabled ? `记忆 ${memory.recallLimit} 条` : "记忆仅索引")
+    : "记忆关闭";
+  els.keyState.textContent = `${keyText} / ${visionText} / ${memoryText}`;
 }
 
 function applyWindowState(next) {
@@ -686,6 +1148,47 @@ function conversationRow(conversation, options = {}) {
 
   row.append(title, rename);
   if (options.extraAction) row.appendChild(options.extraAction);
+  bindContextMenu(row, () => {
+    const items = [
+      {
+        label: "打开",
+        action: options.onSelect || (async () => {
+          currentConversationId = conversation.id;
+          activeKnowledgeBaseId = options.knowledgeBaseId || null;
+          if (activeKnowledgeBaseId) await window.deskchat.setActiveKnowledgeBase(activeKnowledgeBaseId);
+          const store = await window.deskchat.getConversations();
+          applyConversationStore(store, conversation.id);
+        })
+      },
+      { label: "改名", action: () => startEditing("conversation", conversation.id) },
+      {
+        label: "新窗口打开",
+        action: () => window.deskchat.openChatWindow(conversation.id)
+      }
+    ];
+    if (options.knowledgeBaseId) {
+      items.push({
+        label: "移出知识库",
+        action: async () => {
+          await window.deskchat.unlinkConversationFromKnowledgeBase(options.knowledgeBaseId, conversation.id);
+          await loadKnowledgeBases(activeKnowledgeBaseId);
+        }
+      });
+    }
+    items.push({ type: "separator" });
+    items.push({
+      label: "删除对话",
+      danger: true,
+      disabled: conversations.length <= 1,
+      action: async () => {
+        if (!(await confirmAction(`删除对话「${conversation.title || "新对话"}」？`, { confirmLabel: "删除" }))) return;
+        const store = await window.deskchat.deleteConversation(conversation.id);
+        applyConversationStore(store);
+        await loadKnowledgeBases(activeKnowledgeBaseId);
+      }
+    });
+    return items;
+  });
   return row;
 }
 
@@ -775,11 +1278,46 @@ function renderConversationList() {
     remove.title = "删除知识库";
     remove.addEventListener("click", async (event) => {
       event.stopPropagation();
-      if (!window.confirm(`删除知识库「${base.name}」？其中的对话不会删除，上传文件会从本地知识库目录移除。`)) return;
+      if (!(await confirmAction(`删除知识库「${base.name}」？其中的对话不会删除，上传文件会从本地知识库目录移除。`, { confirmLabel: "删除" }))) return;
       await window.deskchat.deleteKnowledgeBase(base.id);
     });
 
     header.append(toggle, folderTitleWrap, count, upload, rename, remove);
+    bindContextMenu(header, () => [
+      {
+        label: base.expanded ? "收起知识库" : "展开知识库",
+        action: () => window.deskchat.saveKnowledgeBase({ id: base.id, expanded: !base.expanded, active: true })
+      },
+      {
+        label: "设为当前知识库",
+        action: async () => {
+          activeKnowledgeBaseId = base.id;
+          currentConversationId = null;
+          chatMessages = [];
+          await window.deskchat.setActiveKnowledgeBase(base.id);
+          renderConversationList();
+          renderMessages();
+        }
+      },
+      {
+        label: "上传文件",
+        action: () => {
+          activeKnowledgeBaseId = base.id;
+          els.knowledgeFileInput.click();
+          renderConversationList();
+        }
+      },
+      { label: "改名", action: () => startEditing("knowledge", base.id) },
+      { type: "separator" },
+      {
+        label: "删除知识库",
+        danger: true,
+        action: async () => {
+          if (!(await confirmAction(`删除知识库「${base.name}」？其中的对话不会删除，上传文件会从本地知识库目录移除。`, { confirmLabel: "删除" }))) return;
+          await window.deskchat.deleteKnowledgeBase(base.id);
+        }
+      }
+    ]);
     section.appendChild(header);
 
     if (base.expanded) {
@@ -800,6 +1338,7 @@ function renderConversationList() {
 
         const row = conversationRow(conversation, {
           nested: true,
+          knowledgeBaseId: base.id,
           extraAction: unlink,
           onSelect: async () => {
             activeKnowledgeBaseId = base.id;
@@ -850,10 +1389,25 @@ function renderConversationList() {
         removeFile.title = "从知识库删除文件";
         removeFile.addEventListener("click", async (event) => {
           event.stopPropagation();
+          if (!(await confirmAction(`从知识库删除文件「${file.name}」？`, { confirmLabel: "删除" }))) return;
           await window.deskchat.removeKnowledgeFile(base.id, file.id);
         });
 
         row.append(open, knowledgeGraph, mindMap, removeFile);
+        bindContextMenu(row, () => [
+          { label: "打开文件", action: () => window.deskchat.openKnowledgeFile(base.id, file.id) },
+          { label: "生成思维导图", action: () => openMindMapPanel(base.id, file.id) },
+          { label: "打开知识图谱", action: () => openKnowledgeGraphPanel(base.id, file.id) },
+          { type: "separator" },
+          {
+            label: "删除文件",
+            danger: true,
+            action: async () => {
+              if (!(await confirmAction(`从知识库删除文件「${file.name}」？`, { confirmLabel: "删除" }))) return;
+              await window.deskchat.removeKnowledgeFile(base.id, file.id);
+            }
+          }
+        ]);
         children.appendChild(row);
       }
 
@@ -908,6 +1462,10 @@ function renderConversationList() {
   els.toolbarLinkKnowledge.disabled = !currentConversationId || !knowledgeBases.length;
   els.toolbarLinkKnowledge.textContent = "加入知识库";
   els.toolbarDeleteConversation.disabled = conversations.length <= 1;
+  els.toolbarShotButton.disabled = false;
+  els.toolbarClearButton.disabled = false;
+  els.toolbarNewWindow.disabled = !currentConversationId;
+  if (els.toolbarOpenTodo) els.toolbarOpenTodo.textContent = "打开 Todo";
 }
 
 function renderEmpty() {
@@ -967,25 +1525,106 @@ function messagesForStorage(messages) {
   const safe = [];
   for (const message of messages) {
     if (!message || message.role === "system" || message.role === "tool") continue;
+    const remember = message.remember === false ? false : undefined;
 
     if (message.role === "assistant") {
       const content = extractTextContent(message.content).trim();
-      if (content) safe.push({ role: "assistant", content });
+      if (content) {
+        safe.push({
+          role: "assistant",
+          content,
+          ...(remember === false ? { remember: false } : {})
+        });
+      }
       continue;
     }
 
     if (message.role === "user") {
-      safe.push({ role: "user", content: message.content });
+      safe.push({
+        role: "user",
+        content: message.content,
+        ...(remember === false ? { remember: false } : {})
+      });
     }
   }
   return safe;
 }
 
-function addMessage(role, text, images = []) {
+function visibleMessageIndexes() {
+  const indexes = [];
+  chatMessages.forEach((message, index) => {
+    if (!message || message.role === "system" || message.role === "tool") return;
+    if (message.role === "assistant" && message.tool_calls && !message.content) return;
+    indexes.push(index);
+  });
+  return indexes;
+}
+
+async function copyMessageText(message) {
+  const text = extractTextContent(message && message.content).trim();
+  if (!text) return;
+  await window.deskchat.copyText(text);
+}
+
+async function deleteMessageAt(index) {
+  if (index < 0 || index >= chatMessages.length) return;
+  const message = chatMessages[index];
+  const text = extractTextContent(message && message.content).trim();
+  const preview = text ? `「${text.slice(0, 40)}${text.length > 40 ? "..." : ""}」` : "这条消息";
+  if (!(await confirmAction(`删除${preview}？`, { confirmLabel: "删除" }))) return;
+  chatMessages.splice(index, 1);
+  renderMessages();
+  await persistCurrentConversation();
+}
+
+async function setMessageRememberAt(index, remember) {
+  if (index < 0 || index >= chatMessages.length) return;
+  const message = chatMessages[index];
+  if (!message || (message.role !== "user" && message.role !== "assistant")) return;
+  if (remember === false) {
+    message.remember = false;
+  } else {
+    delete message.remember;
+  }
+  renderMessages();
+  await persistCurrentConversation();
+}
+
+function bindMessageContextMenu(wrap, messageIndex) {
+  bindContextMenu(wrap, () => {
+    const message = chatMessages[messageIndex];
+    const text = extractTextContent(message && message.content).trim();
+    const hasText = Boolean(text);
+    const excludedFromMemory = message && message.remember === false;
+    return [
+      { label: "复制消息", disabled: !hasText, action: () => copyMessageText(message) },
+      { label: "复制 Markdown", disabled: !hasText, action: () => copyMessageText(message) },
+      {
+        label: excludedFromMemory ? "加入长期记忆" : "不写入长期记忆",
+        disabled: !message || (message.role !== "user" && message.role !== "assistant"),
+        action: () => setMessageRememberAt(messageIndex, excludedFromMemory)
+      },
+      { type: "separator" },
+      {
+        label: "删除消息",
+        danger: true,
+        action: () => deleteMessageAt(messageIndex)
+      }
+    ];
+  });
+}
+
+function addMessage(role, text, images = [], messageIndex = -1) {
   if (!chatMessages.length) els.messages.innerHTML = "";
 
   const wrap = document.createElement("article");
   wrap.className = `message ${role}`;
+  if (messageIndex >= 0) {
+    wrap.dataset.messageIndex = String(messageIndex);
+    bindMessageContextMenu(wrap, messageIndex);
+  }
+  const message = messageIndex >= 0 ? chatMessages[messageIndex] : null;
+  if (message && message.remember === false) wrap.classList.add("memory-excluded");
 
   if (images.length) {
     const thumbs = document.createElement("div");
@@ -1009,6 +1648,12 @@ function addMessage(role, text, images = []) {
     bubble.textContent = text || "";
   }
   wrap.appendChild(bubble);
+  if (message && message.remember === false) {
+    const memoryState = document.createElement("div");
+    memoryState.className = "message-memory-state";
+    memoryState.textContent = "不写入长期记忆";
+    wrap.appendChild(memoryState);
+  }
   els.messages.appendChild(wrap);
   scrollToBottom();
   return bubble;
@@ -1016,16 +1661,17 @@ function addMessage(role, text, images = []) {
 
 function renderMessages() {
   els.messages.innerHTML = "";
-  for (const message of chatMessages) {
+  for (const index of visibleMessageIndexes()) {
+    const message = chatMessages[index];
     if (message.role === "system") continue;
     if (message.role === "tool") {
       continue;
     }
     if (message.role === "assistant" && message.tool_calls) {
-      if (message.content) addMessage("assistant", message.content);
+      if (message.content) addMessage("assistant", message.content, [], index);
       continue;
     }
-    addMessage(message.role, extractTextContent(message.content), extractImages(message.content));
+    addMessage(message.role, extractTextContent(message.content), extractImages(message.content), index);
   }
   renderEmpty();
 }
@@ -1061,7 +1707,6 @@ function applyKnowledgeStore(store, preferredId) {
     (activeKnowledgeBaseId && knowledgeBases.some((base) => base.id === activeKnowledgeBaseId) ? activeKnowledgeBaseId : null) ||
     store.activeKnowledgeBaseId ||
     null;
-  if (els.knowledgeSearchInput && !activeKnowledgeBaseId) els.knowledgeSearchInput.value = "";
   clearKnowledgeSearchResults();
   renderConversationList();
 }
@@ -1075,36 +1720,164 @@ function clearKnowledgeSearchResults() {
   if (els.knowledgeSearchResults) els.knowledgeSearchResults.innerHTML = "";
 }
 
+function showKnowledgeSearchMessage(message, className = "knowledge-search-empty") {
+  if (!els.knowledgeSearchResults) return;
+  clearKnowledgeSearchResults();
+  const item = document.createElement("div");
+  item.className = className;
+  item.textContent = message;
+  els.knowledgeSearchResults.appendChild(item);
+}
+
+function knowledgeSearchResultTitle(result) {
+  if (!result) return "未命中片段";
+  if (result.type === "conversation") return `${result.conversationTitle || "对话记忆"} #${Number(result.chunkIndex) + 1}`;
+  if (result.type === "memory") return `${result.conversationTitle || "长期记忆"} #${Number(result.chunkIndex) + 1}`;
+  return `${result.fileName || "知识文件"} #${Number(result.chunkIndex) + 1}`;
+}
+
+function knowledgeSearchResultRef(result) {
+  if (!result) return "[片段]";
+  if (result.type === "conversation") {
+    return `[对话记忆:${result.conversationTitle || result.conversationId}#${Number(result.chunkIndex) + 1}]`;
+  }
+  if (result.type === "memory") {
+    return `[长期记忆:${result.conversationTitle || result.conversationId}#${Number(result.chunkIndex) + 1}]`;
+  }
+  return `[${result.fileName || "知识文件"}#${Number(result.chunkIndex) + 1}]`;
+}
+
+function promptTextForKnowledgeSearchResult(result) {
+  return `请基于这个片段回答：${knowledgeSearchResultRef(result)}\n\n${String(result && result.text || "").slice(0, 1200)}`;
+}
+
+function insertKnowledgeSearchResult(result, append = false) {
+  const text = promptTextForKnowledgeSearchResult(result);
+  const current = els.prompt.value.trim();
+  els.prompt.value = append && current ? `${current}\n\n${text}` : text;
+  els.prompt.focus();
+}
+
+function canOpenKnowledgeSearchSource(result) {
+  if (!result) return false;
+  if (result.type === "file") return Boolean(result.knowledgeBaseId && result.fileId);
+  return Boolean(result.conversationId);
+}
+
+async function openKnowledgeSearchSource(result) {
+  if (!canOpenKnowledgeSearchSource(result)) return;
+  if (result.type === "file") {
+    const opened = await window.deskchat.openKnowledgeFile(result.knowledgeBaseId, result.fileId);
+    if (opened && opened.ok === false) await addAssistantNotice(opened.error || "打开文件失败。");
+    return;
+  }
+
+  const store = await window.deskchat.getConversations();
+  const source = (store.conversations || []).find((conversation) => conversation.id === result.conversationId);
+  if (!source) {
+    await addAssistantNotice("找不到这条记忆对应的原始对话。");
+    return;
+  }
+
+  const sourceBase = result.knowledgeBaseId
+    ? knowledgeBases.find((base) => base.id === result.knowledgeBaseId)
+    : knowledgeBaseForConversation(result.conversationId);
+  activeKnowledgeBaseId = sourceBase ? sourceBase.id : null;
+  await window.deskchat.setActiveKnowledgeBase(activeKnowledgeBaseId);
+  applyConversationStore(store, result.conversationId);
+  await loadKnowledgeBases(activeKnowledgeBaseId);
+}
+
 async function runKnowledgeSearch() {
   const base = activeKnowledgeBase();
   const query = els.knowledgeSearchInput ? els.knowledgeSearchInput.value.trim() : "";
+  const runId = knowledgeSearchRunId + 1;
+  knowledgeSearchRunId = runId;
   clearKnowledgeSearchResults();
-  if (!els.knowledgeSearchResults || !base || query.length < 2) return;
+  if (!els.knowledgeSearchResults || query.length < 2) return;
 
-  const search = await window.deskchat.searchKnowledgeBase(base.id, query, { limit: 6 });
-  if (!search.results || !search.results.length) {
+  let knowledgeSearch;
+  let memorySearch;
+  try {
+    [knowledgeSearch, memorySearch] = await Promise.all([
+      base
+        ? window.deskchat.searchKnowledgeMemories(base.id, query, {
+            fileLimit: 5,
+            conversationLimit: 3,
+            excludeConversationId: currentConversationId
+          })
+        : Promise.resolve({ fileResults: [], conversationResults: [] }),
+      window.deskchat.searchMemories(query, {
+        limit: base ? 4 : 8,
+        excludeConversationIds: memoryExcludeConversationIds(),
+        includeDisabled: true
+      })
+    ]);
+  } catch (error) {
+    const latestQuery = els.knowledgeSearchInput ? els.knowledgeSearchInput.value.trim() : "";
+    if (runId !== knowledgeSearchRunId || latestQuery !== query) return;
+    showKnowledgeSearchMessage(`搜索失败：${error.message || "未知错误"}`, "knowledge-search-empty knowledge-search-error");
+    return;
+  }
+
+  const latestQuery = els.knowledgeSearchInput ? els.knowledgeSearchInput.value.trim() : "";
+  if (runId !== knowledgeSearchRunId || latestQuery !== query) return;
+  const results = [
+    ...((knowledgeSearch.fileResults || []).map((result) => ({ ...result, type: "file" }))),
+    ...((knowledgeSearch.conversationResults || []).map((result) => ({ ...result, type: "conversation" }))),
+    ...((memorySearch.results || []).map((result) => ({ ...result, type: "memory" })))
+  ].sort((a, b) => b.score - a.score).slice(0, 8);
+
+  if (!results.length) {
     const empty = document.createElement("div");
     empty.className = "knowledge-search-empty";
-    empty.textContent = "没有命中片段";
+    empty.textContent = "没有命中知识或记忆";
     els.knowledgeSearchResults.appendChild(empty);
     return;
   }
 
-  for (const result of search.results) {
+  for (const result of results) {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "knowledge-search-result";
+    const isConversation = result.type === "conversation";
+    const isMemory = result.type === "memory";
+    const title = knowledgeSearchResultTitle(result);
     item.innerHTML = `
-      <span>${escapeHtml(result.fileName)} #${Number(result.chunkIndex) + 1}</span>
+      <span>${escapeHtml(isConversation || isMemory ? `记忆：${title}` : title)}</span>
       <small>${escapeHtml(result.text.slice(0, 180))}</small>
     `;
-    item.addEventListener("click", () => {
-      const ref = `[${result.fileName}#${Number(result.chunkIndex) + 1}]`;
-      els.prompt.value = `请基于这个知识库片段回答：${ref}\n\n${result.text.slice(0, 1200)}`;
-      els.prompt.focus();
-    });
+    item.addEventListener("click", () => insertKnowledgeSearchResult(result));
+    bindContextMenu(item, () => [
+      { label: "引用到输入框", action: () => insertKnowledgeSearchResult(result) },
+      { label: "追加到输入框", action: () => insertKnowledgeSearchResult(result, true) },
+      {
+        label: "复制片段",
+        action: () => window.deskchat.copyText(`${knowledgeSearchResultRef(result)}\n\n${result.text || ""}`)
+      },
+      { type: "separator" },
+      {
+        label: result.type === "file" ? "打开文件" : "打开原对话",
+        disabled: !canOpenKnowledgeSearchSource(result),
+        action: () => openKnowledgeSearchSource(result)
+      }
+    ]);
     els.knowledgeSearchResults.appendChild(item);
   }
+}
+
+function removeAttachmentAt(index) {
+  if (index < 0 || index >= pendingImages.length) return;
+  pendingImages.splice(index, 1);
+  renderAttachments();
+}
+
+function moveAttachment(index, offset) {
+  const nextIndex = index + offset;
+  if (index < 0 || nextIndex < 0 || index >= pendingImages.length || nextIndex >= pendingImages.length) return;
+  const [item] = pendingImages.splice(index, 1);
+  pendingImages.splice(nextIndex, 0, item);
+  renderAttachments();
 }
 
 function renderAttachments() {
@@ -1119,10 +1892,25 @@ function renderAttachments() {
     remove.type = "button";
     remove.textContent = "x";
     remove.addEventListener("click", () => {
-      pendingImages.splice(index, 1);
-      renderAttachments();
+      removeAttachmentAt(index);
     });
     item.append(img, remove);
+    bindContextMenu(item, () => [
+      { label: "删除附件", action: () => removeAttachmentAt(index) },
+      { label: "前移", disabled: index <= 0, action: () => moveAttachment(index, -1) },
+      { label: "后移", disabled: index >= pendingImages.length - 1, action: () => moveAttachment(index, 1) },
+      { label: "复制图片数据", action: () => window.deskchat.copyText(dataUrl) },
+      { type: "separator" },
+      {
+        label: "清空全部附件",
+        danger: true,
+        disabled: !pendingImages.length,
+        action: () => {
+          pendingImages = [];
+          renderAttachments();
+        }
+      }
+    ]);
     els.attachments.appendChild(item);
   }
 }
@@ -1140,23 +1928,27 @@ async function addFilesToKnowledgeBase(files, knowledgeBaseId = activeKnowledgeB
   const targetId = knowledgeBaseId || activeKnowledgeBaseId;
   const target = knowledgeBases.find((base) => base.id === targetId);
   if (!target) {
-    addMessage("assistant", "请先选择或创建一个知识库，再上传文件。");
+    await addAssistantNotice("请先选择或创建一个知识库，再上传文件。");
     return;
   }
 
   for (const file of files) {
     if (file.size > KNOWLEDGE_FILE_LIMIT_BYTES) {
-      addMessage("assistant", `文件「${file.name}」超过 1 GB，暂未导入知识库。`);
+      await addAssistantNotice(`文件「${file.name}」超过 1 GB，暂未导入知识库。`);
       continue;
     }
 
-    const buffer = await file.arrayBuffer();
-    await window.deskchat.addKnowledgeFile(target.id, {
-      name: file.name,
-      type: file.type || "application/octet-stream",
-      size: file.size,
-      bytes: new Uint8Array(buffer)
-    });
+    try {
+      const buffer = await file.arrayBuffer();
+      await window.deskchat.addKnowledgeFile(target.id, {
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        bytes: new Uint8Array(buffer)
+      });
+    } catch (error) {
+      await addAssistantNotice(`文件「${file.name}」导入失败：${error.message}`);
+    }
   }
 
   await loadKnowledgeBases(target.id);
@@ -1218,19 +2010,38 @@ async function buildRetrievedKnowledgeContextPrompt(query) {
     "",
     "",
     `当前知识库：${base.name}`,
-    "下面是按用户问题检索出的知识库片段。回答时优先引用这些材料；如果材料不足，请明确说明。引用格式使用 [文件名#片段序号]。"
+    "下面是按用户问题检索出的知识库片段和对话记忆。回答时优先引用这些材料；如果材料不足，请明确说明。文件引用格式使用 [文件名#片段序号]，对话记忆引用格式使用 [对话记忆:标题#片段序号]。"
   ];
 
-  if (!base.files.length) {
+  if (!base.files.length && !base.conversationIds.length) {
     lines.push("当前知识库还没有上传文件。");
   } else {
-    const search = await window.deskchat.searchKnowledgeBase(base.id, query || "", { limit: 8 });
-    if (search.results && search.results.length) {
-      for (const result of search.results) {
+    let search;
+    try {
+      search = await window.deskchat.searchKnowledgeMemories(base.id, query || "", {
+        fileLimit: 8,
+        conversationLimit: 4,
+        excludeConversationId: currentConversationId
+      });
+    } catch (error) {
+      lines.push(`知识库检索暂时失败：${error.message || "未知错误"}。本次回答不要假设已检索到知识库内容。`);
+      return lines.join("\n");
+    }
+    if (search.fileResults && search.fileResults.length) {
+      lines.push("\n文件片段：");
+      for (const result of search.fileResults) {
         lines.push(`\n[${result.fileName}#${Number(result.chunkIndex) + 1}] score=${result.score}`);
         lines.push(result.text);
       }
-    } else {
+    }
+    if (search.conversationResults && search.conversationResults.length) {
+      lines.push("\n对话记忆：");
+      for (const result of search.conversationResults) {
+        lines.push(`\n[对话记忆:${result.conversationTitle || result.conversationId}#${Number(result.chunkIndex) + 1}] score=${result.score}`);
+        lines.push(result.text);
+      }
+    }
+    if (!(search.fileResults && search.fileResults.length) && !(search.conversationResults && search.conversationResults.length)) {
       lines.push("没有检索到与本次问题直接相关的片段。可参考文件清单：");
       for (const file of base.files.slice(0, 20)) {
         const chunkCount = file.indexStats && file.indexStats.chunkCount ? file.indexStats.chunkCount : 0;
@@ -1245,6 +2056,40 @@ async function buildRetrievedKnowledgeContextPrompt(query) {
     for (const conversation of relatedConversations.slice(0, 12)) {
       lines.push(`- ${conversation.title || "新对话"}`);
     }
+  }
+
+  return lines.join("\n");
+}
+
+async function buildRetrievedMemoryContextPrompt(query) {
+  const memory = normalizeMemorySettings(getSettings().memory);
+  if (!memory.enabled || !memory.recallEnabled || !memory.recallLimit) return "";
+  let search;
+  try {
+    search = await window.deskchat.searchMemories(query || "", {
+      limit: memory.recallLimit,
+      excludeConversationIds: memoryExcludeConversationIds()
+    });
+  } catch (error) {
+    return [
+      "",
+      "",
+      `长期记忆检索暂时失败：${error.message || "未知错误"}。本次回答不要假设已召回历史记忆。`
+    ].join("\n");
+  }
+  const results = search && Array.isArray(search.results) ? search.results : [];
+  if (!results.length) return "";
+
+  const lines = [
+    "",
+    "",
+    "长期记忆：",
+    "下面是从历史对话自动召回的相关记忆。回答时只在确实相关时使用；如果与当前问题冲突，以用户本轮明确要求为准。引用格式使用 [长期记忆:标题#片段序号]。"
+  ];
+
+  for (const result of results) {
+    lines.push(`\n[长期记忆:${result.conversationTitle || result.conversationId}#${Number(result.chunkIndex) + 1}] score=${result.score}`);
+    lines.push(result.text);
   }
 
   return lines.join("\n");
@@ -1375,7 +2220,8 @@ async function executeToolCall(call) {
       },
       followUpMessage: {
         role: "user",
-        content: [{ type: "text", text: "这是刚刚通过截图工具获得的屏幕截图，请基于它继续回答。" }, imagePart(shot.dataUrl)]
+        content: [{ type: "text", text: "这是刚刚通过截图工具获得的屏幕截图，请基于它继续回答。" }, imagePart(shot.dataUrl)],
+        remember: false
       }
     };
   }
@@ -1411,23 +2257,26 @@ async function sendMessage(text, images = []) {
     await ensureConversationForActiveKnowledgeBase();
 
     if (images.length && !getSettings().supportsVision) {
-      addMessage(
-        "assistant",
+      pendingImages = [...images, ...pendingImages];
+      renderAttachments();
+      await addAssistantNotice(
         "当前 API 配置是“仅文本”，不能发送图片或截图。请在 API 配置里开启“支持图片输入”，或切换到支持视觉的模型/中转站。"
       );
       return;
     }
 
-    addMessage("user", text || "请分析图片。", images);
+    const userMessageIndex = chatMessages.length;
     chatMessages.push({ role: "user", content: userContent(text, images) });
+    addMessage("user", text || "请分析图片。", images, userMessageIndex);
     await persistCurrentConversation();
 
     const settings = getSettings();
     const capabilityPrompt = settings.supportsVision ? "" : window.DeskchatConfig.TEXT_ONLY_CAPABILITY_PROMPT;
     const formatPrompt = window.DeskchatConfig.RESPONSE_FORMAT_PROMPT;
     const knowledgePrompt = await buildRetrievedKnowledgeContextPrompt(text);
+    const memoryPrompt = await buildRetrievedMemoryContextPrompt(text);
     let apiMessages = [
-      { role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}` },
+      { role: "system", content: `${settings.systemPrompt}${capabilityPrompt}${formatPrompt}${knowledgePrompt}${memoryPrompt}` },
       ...messagesForModel(chatMessages, settings)
     ];
     let finalText = "";
@@ -1439,8 +2288,9 @@ async function sendMessage(text, images = []) {
 
       if (!assistantMessage.tool_calls || !assistantMessage.tool_calls.length) {
         finalText = assistantMessage.content || "";
+        const assistantMessageIndex = chatMessages.length;
         chatMessages.push({ role: "assistant", content: finalText });
-        addMessage("assistant", finalText || "完成。");
+        addMessage("assistant", finalText || "完成。", [], assistantMessageIndex);
         break;
       }
 
@@ -1456,14 +2306,16 @@ async function sendMessage(text, images = []) {
     }
 
     if (!finalText) {
-      addMessage("assistant", "工具步骤已达到上限，请继续发送一句话让我接着处理。");
+      apiMessages.push({ role: "assistant", content: "工具步骤已达到上限，请继续发送一句话让我接着处理。", remember: false });
     }
 
     chatMessages = messagesForStorage(apiMessages.slice(1));
+    renderMessages();
     await persistCurrentConversation();
   } catch (error) {
-    addMessage("assistant", `出错了：${error.message}`);
-    chatMessages.push({ role: "assistant", content: `出错了：${error.message}` });
+    const errorMessageIndex = chatMessages.length;
+    chatMessages.push({ role: "assistant", content: `出错了：${error.message}`, remember: false });
+    addMessage("assistant", `出错了：${error.message}`, [], errorMessageIndex);
     await persistCurrentConversation();
   } finally {
     busy = false;
@@ -1477,27 +2329,31 @@ async function captureToAttachments() {
     pendingImages.push(shot.dataUrl);
     renderAttachments();
   } catch (error) {
-    addMessage("assistant", `截图失败：${error.message}`);
+    await addAssistantNotice(`截图失败：${error.message}`);
   }
 }
 
 els.toolbarSettings.addEventListener("click", () => window.deskchat.openSettings());
 els.toolbarNewWindow.addEventListener("click", () => window.deskchat.openChatWindow(currentConversationId));
+if (els.toolbarOpenTodo) {
+  els.toolbarOpenTodo.addEventListener("click", openTodoWindow);
+}
+if (els.toolbarMemoryCenter) {
+  els.toolbarMemoryCenter.addEventListener("click", openMemoryCenter);
+}
 els.compactButton.addEventListener("click", async () => {
   applyWindowState(await window.deskchat.setCompactMode(!windowState.compact));
 });
 els.pinButton.addEventListener("click", async () => {
   applyWindowState(await window.deskchat.setPinnedMode(!windowState.pinned));
 });
-els.newConversation.addEventListener("click", async () => {
-  const conversation = await window.deskchat.createConversation("新对话");
-  if (activeKnowledgeBaseId) {
-    await window.deskchat.linkConversationToKnowledgeBase(activeKnowledgeBaseId, conversation.id);
-  }
-  const store = await window.deskchat.getConversations();
-  applyConversationStore(store, conversation.id);
-  await loadKnowledgeBases(activeKnowledgeBaseId);
-});
+els.newConversation.addEventListener("click", createConversationFromMenu);
+if (els.openTodoList) {
+  els.openTodoList.addEventListener("click", openTodoWindow);
+}
+if (els.openMemoryCenter) {
+  els.openMemoryCenter.addEventListener("click", openMemoryCenter);
+}
 els.newKnowledgeBase.addEventListener("click", async () => {
   const base = await window.deskchat.createKnowledgeBase("新知识库");
   activeKnowledgeBaseId = base.id;
@@ -1521,9 +2377,93 @@ els.clearKnowledgeSelection.addEventListener("click", async () => {
 if (els.knowledgeSearchInput) {
   els.knowledgeSearchInput.addEventListener("input", debounce(runKnowledgeSearch, 250));
 }
-els.toolbarUploadKnowledge.addEventListener("click", () => {
+bindContextMenu(document.querySelector(".sidebar"), () => [
+  { label: "新建对话", action: createConversationFromMenu },
+  { label: "新建知识库", action: () => els.newKnowledgeBase.click() },
+  { label: "打开 Todo", action: openTodoWindow },
+  { label: "记忆中心", action: openMemoryCenter },
+  { label: "设置", action: () => window.deskchat.openSettings() },
+  { type: "separator" },
+  {
+    label: "上传知识文件",
+    disabled: !activeKnowledgeBase(),
+    action: () => els.knowledgeFileInput.click()
+  },
+  {
+    label: "清除知识库选择",
+    disabled: !activeKnowledgeBaseId,
+    action: async () => {
+      activeKnowledgeBaseId = null;
+      await window.deskchat.setActiveKnowledgeBase(null);
+      if (els.knowledgeSearchInput) els.knowledgeSearchInput.value = "";
+      clearKnowledgeSearchResults();
+      renderConversationList();
+    }
+  }
+]);
+bindContextMenu(els.messages, () => [
+  { label: "新建对话", action: createConversationFromMenu },
+  { label: "打开 Todo", action: openTodoWindow },
+  { label: "记忆中心", action: openMemoryCenter },
+  { type: "separator" },
+  { label: "截图到输入框", action: captureToAttachments },
+  {
+    label: "上传图片",
+    action: () => els.fileInput.click()
+  },
+  {
+    label: "上传知识文件",
+    disabled: !activeKnowledgeBase(),
+    action: () => els.knowledgeFileInput.click()
+  },
+  { type: "separator" },
+  {
+    label: "清空当前对话",
+    disabled: !chatMessages.length,
+    danger: true,
+    action: clearCurrentConversation
+  },
+  {
+    label: "删除当前对话",
+    disabled: !currentConversationId || conversations.length <= 1,
+    danger: true,
+    action: deleteCurrentConversation
+  }
+]);
+bindContextMenu(document.querySelector(".chat-toolbar"), () => [
+  { label: "新窗口打开当前对话", disabled: !currentConversationId, action: () => window.deskchat.openChatWindow(currentConversationId) },
+  { label: windowState.compact ? "恢复窗口" : "长条模式", action: async () => applyWindowState(await window.deskchat.setCompactMode(!windowState.compact)) },
+  { label: windowState.pinned ? "取消置顶" : "置顶", action: async () => applyWindowState(await window.deskchat.setPinnedMode(!windowState.pinned)) },
+  { type: "separator" },
+  { label: "API 配置", action: () => window.deskchat.openSettings() },
+  { label: "打开 Todo", action: openTodoWindow },
+  { label: "记忆中心", action: openMemoryCenter }
+]);
+bindContextMenu(els.composer, () => [
+  { label: "发送", disabled: busy || (!els.prompt.value.trim() && !pendingImages.length), action: () => els.composer.requestSubmit() },
+  { label: "截图到输入框", action: captureToAttachments },
+  { label: "上传图片", action: () => els.fileInput.click() },
+  {
+    label: "清空附件",
+    disabled: !pendingImages.length,
+    action: () => {
+      pendingImages = [];
+      renderAttachments();
+    }
+  },
+  { type: "separator" },
+  {
+    label: "清空输入框",
+    disabled: !els.prompt.value.length,
+    action: () => {
+      els.prompt.value = "";
+      els.prompt.focus();
+    }
+  }
+]);
+els.toolbarUploadKnowledge.addEventListener("click", async () => {
   if (!activeKnowledgeBase()) {
-    addMessage("assistant", "请先在左侧选择或创建一个知识库。");
+    await addAssistantNotice("请先在左侧选择或创建一个知识库。");
     return;
   }
   els.knowledgeFileInput.click();
@@ -1533,14 +2473,9 @@ els.toolbarLinkKnowledge.addEventListener("click", async () => {
     closeKnowledgePicker();
     return;
   }
-  openKnowledgePicker(els.toolbarLinkKnowledge);
+  await openKnowledgePicker(els.toolbarLinkKnowledge);
 });
-els.toolbarDeleteConversation.addEventListener("click", async () => {
-  if (!currentConversationId || conversations.length <= 1) return;
-  const store = await window.deskchat.deleteConversation(currentConversationId);
-  applyConversationStore(store);
-  await loadKnowledgeBases(activeKnowledgeBaseId);
-});
+els.toolbarDeleteConversation.addEventListener("click", deleteCurrentConversation);
 window.deskchat.onWindowState(applyWindowState);
 window.deskchat.onSettingsUpdated((settings) => {
   currentSettings = settings;
@@ -1548,6 +2483,12 @@ window.deskchat.onSettingsUpdated((settings) => {
 });
 window.deskchat.onConversationsUpdated((store) => {
   applyConversationStore(store, currentConversationId);
+});
+window.deskchat.onMemoriesUpdated(() => {
+  if (els.knowledgeSearchInput && els.knowledgeSearchInput.value.trim().length >= 2) {
+    runKnowledgeSearch();
+  }
+  if (memoryPanel) refreshMemoryPanel();
 });
 window.deskchat.onKnowledgeBasesUpdated((store) => {
   applyKnowledgeStore(store, activeKnowledgeBaseId);
@@ -1564,14 +2505,7 @@ els.knowledgeFileInput.addEventListener("change", async (event) => {
 
 els.toolbarShotButton.addEventListener("click", captureToAttachments);
 
-els.toolbarClearButton.addEventListener("click", async () => {
-  chatMessages = [];
-  pendingImages = [];
-  els.messages.innerHTML = "";
-  renderAttachments();
-  renderEmpty();
-  await persistCurrentConversation();
-});
+els.toolbarClearButton.addEventListener("click", clearCurrentConversation);
 
 els.composer.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1603,7 +2537,9 @@ els.prompt.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  if (contextMenu && !contextMenu.contains(event.target)) closeContextMenu();
   if (activeMenuGroup && !activeMenuGroup.contains(event.target)) closeAppMenus();
+  if (memoryPanel && event.target === memoryPanel) closeMemoryPanel();
   if (!knowledgePickerOpen) return;
   const picker = document.querySelector(".knowledge-picker");
   if (picker && !picker.contains(event.target) && !els.toolbarLinkKnowledge.contains(event.target)) {
@@ -1613,20 +2549,22 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (memoryPanel) closeMemoryPanel();
   if (knowledgeGraphPanel) closeKnowledgeGraphPanel();
   if (mindMapPanel) closeMindMapPanel();
+  if (contextMenu) closeContextMenu();
   if (knowledgePickerOpen) closeKnowledgePicker();
   if (activeMenuGroup) closeAppMenus();
 });
 
-loadSettings().catch((error) => {
-  addMessage("assistant", `读取设置失败：${error.message}`);
+loadSettings().catch(async (error) => {
+  await addAssistantNotice(`读取设置失败：${error.message}`);
 });
-loadConversations().catch((error) => {
-  addMessage("assistant", `读取历史对话失败：${error.message}`);
+loadConversations().catch(async (error) => {
+  await addAssistantNotice(`读取历史对话失败：${error.message}`);
 });
-loadKnowledgeBases().catch((error) => {
-  addMessage("assistant", `读取知识库失败：${error.message}`);
+loadKnowledgeBases().catch(async (error) => {
+  await addAssistantNotice(`读取知识库失败：${error.message}`);
 });
 window.deskchat.getWindowState().then(applyWindowState).catch(() => {});
 renderEmpty();

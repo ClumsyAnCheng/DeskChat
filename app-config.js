@@ -11,6 +11,15 @@
       "你是一个运行在用户电脑上的桌面 AI 助手。你可以分析用户上传的图片和截图，也可以在用户明确要求时调用工具执行命令、移动鼠标或点击。调用命令和鼠标工具前先简短说明意图。"
   };
 
+  const DEFAULT_MEMORY_SETTINGS = {
+    enabled: true,
+    rememberAssistant: true,
+    recallEnabled: true,
+    recallLimit: 6,
+    minMessageChars: 8,
+    minChunkChars: 24
+  };
+
   const TOOL_DEFINITIONS = [
     {
       type: "function",
@@ -79,6 +88,7 @@
 
   window.DeskchatConfig = {
     DEFAULT_SETTINGS,
+    DEFAULT_MEMORY_SETTINGS,
     TOOL_DEFINITIONS,
     TEXT_ONLY_CAPABILITY_PROMPT,
     RESPONSE_FORMAT_PROMPT

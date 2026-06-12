@@ -3,15 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>API Settings</title>
+    <title>Deskchat 设置</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="settings-body">
     <main class="settings-shell">
       <header class="settings-header">
         <div>
-          <h1>API 配置</h1>
-          <p>保存多个 OpenAI、DeepSeek 或兼容中转站配置，并随时切换。</p>
+          <h1>Deskchat 设置</h1>
+          <p>管理 API、RAGFlow 和长期记忆配置，并随时切换模型。</p>
         </div>
       </header>
 
@@ -75,7 +75,34 @@
           <input id="ragflowDatasetId" autocomplete="off" />
         </section>
 
+        <section class="settings-section">
+          <label class="check standalone-check">
+            <input id="memoryEnabled" type="checkbox" />
+            <span>开启长期记忆索引</span>
+          </label>
+
+          <label class="check standalone-check">
+            <input id="memoryRecallEnabled" type="checkbox" />
+            <span>发送消息时自动召回相关长期记忆</span>
+          </label>
+
+          <label class="check standalone-check">
+            <input id="memoryRememberAssistant" type="checkbox" />
+            <span>把助手回复也写入长期记忆</span>
+          </label>
+
+          <label for="memoryRecallLimit">每次最多召回记忆条数</label>
+          <input id="memoryRecallLimit" type="number" min="0" max="12" step="1" />
+
+          <label for="memoryMinMessageChars">单条消息最少记忆字数</label>
+          <input id="memoryMinMessageChars" type="number" min="1" max="200" step="1" />
+
+          <label for="memoryMinChunkChars">索引片段最少字数</label>
+          <input id="memoryMinChunkChars" type="number" min="1" max="600" step="1" />
+        </section>
+
         <footer class="settings-actions">
+          <span id="settingsStatus" class="settings-status" role="status"></span>
           <button id="resetProvider" type="button" class="secondary">恢复当前服务商默认值</button>
           <button id="saveSettings" type="submit">保存配置</button>
         </footer>
